@@ -1,17 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 96 96" shape-rendering="crispEdges" role="img" aria-labelledby="title desc">
   <title id="title">NEU Court Booking</title>
-  <desc id="desc">深蓝圆角方形中的白色羽毛球与薄荷绿场地线，项目原创标志。</desc>
-  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#10233f"/><stop offset="1" stop-color="#173e4c"/></linearGradient></defs>
-  <rect width="192" height="192" rx="48" fill="url(#bg)"/>
-  <path d="M30 144v18h116M46 162v-32m-16 14h116" fill="none" stroke="#70dec1" stroke-width="3" opacity=".55"/>
-  <g transform="translate(96 92) rotate(39)">
-    <path d="M-20 22-46-40q-4-14 5-16 9-1 12 14L-8 21Z" fill="#d1e9ef"/>
-    <path d="M-12 22-26-51q-2-13 7-14 9 0 9 14L1 21Z" fill="#f5fbff"/>
-    <path d="m-5 21-4-77q0-13 9-13t9 13L5 21Z" fill="#fff"/>
-    <path d="m1 21 9-72q1-14 10-14 9 1 6 14L12 22Z" fill="#eef9fc"/>
-    <path d="m8 21 21-63q4-15 12-14 9 3 5 16L20 22Z" fill="#cee9ee"/>
-    <path d="M-28-20Q0-9 28-20M-21 4Q0 10 21 4" fill="none" stroke="#7bb6c5" stroke-width="2"/>
-    <path d="M-20 18h40v12a20 20 0 0 1-40 0Z" fill="#fff"/>
-    <rect x="-21" y="14" width="42" height="9" rx="4" fill="#70dec1"/>
-  </g>
+  <desc id="desc">深蓝方形中的像素羽毛球、南湖双门柱轮廓与青绿色球场线。项目原创标志，非学校校徽。</desc>
+  <rect width="96" height="96" rx="16" fill="#10283f" shape-rendering="geometricPrecision"/>
+  <path d="M16 8H80V12H84V16H88V80H84V84H80V88H16V84H12V80H8V16H12V12H16Z" fill="#173b49"/>
+
+  <!-- Twin stone gateposts, reduced to a clear stepped silhouette. -->
+  <path d="M16 32H28V36H32V40H28V68H32V72H12V68H16V40H12V36H16Z" fill="#a1b0a2"/>
+  <path d="M68 32H80V36H84V40H80V68H84V72H64V68H68V40H64V36H68Z" fill="#a1b0a2"/>
+  <path d="M16 40H20V64H16ZM68 40H72V64H68Z" fill="#e8dbb9"/>
+  <path d="M24 40H28V68H24ZM76 40H80V68H76Z" fill="#638b88"/>
+  <path d="M16 32H28V36H16ZM12 36H32V40H12ZM68 32H80V36H68ZM64 36H84V40H64Z" fill="#e9c97f"/>
+  <path d="M12 40H32V44H12ZM64 40H84V44H64Z" fill="#46666b"/>
+  <path d="M12 68H32V72H12ZM64 68H84V72H64Z" fill="#cfbd94"/>
+
+  <!-- White feather fan; every edge follows the four-unit pixel grid. -->
+  <path d="M28 20H36V16H44V12H52V16H60V20H68V28H64V36H60V44H56V52H40V44H36V36H32V28H28Z" fill="#f8efd9"/>
+  <path d="M44 12H52V36H48V44H44ZM28 20H32V28H36V36H40V44H44V52H40V44H36V36H32V28H28Z" fill="#fff9ea"/>
+  <path d="M36 20H40V32H36ZM44 16H48V36H44ZM52 20H56V36H52ZM60 24H64V28H60Z" fill="#173b49"/>
+  <path d="M40 32H44V40H40ZM48 36H52V44H48ZM56 32H60V40H56Z" fill="#d9bf83"/>
+  <path d="M60 28H64V36H60V44H56V52H52V44H56V36H60Z" fill="#bcdacb"/>
+  <rect x="40" y="52" width="16" height="4" fill="#69d7b4"/>
+  <path d="M40 56H56V64H52V68H44V64H40Z" fill="#f8efd9"/>
+  <path d="M52 56H56V64H52V68H48V64H52Z" fill="#d9bf83"/>
+
+  <!-- Minimal court baseline and centre mark anchor the icon at small sizes. -->
+  <path d="M20 76H76V80H20ZM12 80H20V84H12ZM76 80H84V84H76ZM16 84H80V88H16Z" fill="#69d7b4"/>
+  <rect x="44" y="76" width="4" height="12" fill="#c2ead4"/>
 </svg>

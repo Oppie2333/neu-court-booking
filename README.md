@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" width="76" height="76" alt="NEU Court Booking 项目标志">
+  <img src="docs/assets/logo.svg" width="88" height="88" alt="NEU Court Booking 像素风羽毛球项目标志">
 </p>
 
 <h1 align="center">NEU Court Booking</h1>
@@ -22,6 +22,10 @@
   <a href="NEWS.md">NEWS</a> ·
   <a href="CHANGELOG.md">更新记录</a> ·
   <a href="https://github.com/Oppie2333/neu-court-booking/issues">问题反馈</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/neu-nanhu-pixel.png" width="800" alt="像素 Q 版东北大学南湖校门与羽毛球运动插画：石门柱、中央教学楼、球场和跃起扣杀的运动员。">
 </p>
 
 面向拥有学校预约权限的同学，帮助完成**一次日期明确、最多一份订单**的南湖羽毛球预约。设置日期与时段后，由本人登录学校，程序等待放号并处理预约流程。
@@ -56,6 +60,8 @@
 登录、验证码和最终付款由本人完成。**待支付不代表预约成功**，最终以学校有效订单为准。运行期间不要同时手工提交同一任务。
 
 ## 📰 NEWS
+
+**2026-10-19 · 项目介绍更新** — 新增像素 Q 版南湖校门与羽毛球运动页首插画，精简页面并补充场馆适用范围。
 
 **2026-10-19 · v1.0.0** — 首个可分发测试版：中文设置界面、异常提示重试、订单核验、Windows 运行包与开源构建流程。
 
@@ -93,6 +99,6 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 
 ## 🤝 许可与致谢
 
-原创程序与矢量设计采用 [MIT License](LICENSE)，设计说明见 [素材说明](docs/assets/ATTRIBUTION.md)。第三方运行组件保留各自许可，见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
+程序与项目美术采用 [MIT License](LICENSE)，像素 Q 版页首插画由 AI 辅助生成，来源与设计说明见 [素材说明](docs/assets/ATTRIBUTION.md)。第三方运行组件保留各自许可，见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
 
 开发时审阅过 [Jian2032/neu_badminton_tool](https://github.com/Jian2032/neu_badminton_tool) 与 [MeowgicalAI/Auto-Reservation](https://github.com/MeowgicalAI/Auto-Reservation)，并根据学校实际页面独立实现本项目。参考仓库的完整授权未核实，本项目不分发其代码、驱动或可执行程序。

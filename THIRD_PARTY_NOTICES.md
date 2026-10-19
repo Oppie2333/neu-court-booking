@@ -16,7 +16,9 @@ When distributing a Windows build, retain the generated third-party license dire
 
 ## README artwork
 
-The project logo and badminton banner are original vector artwork under MIT. The campus photograph has been removed from the current branch. Historical releases retain the notices distributed with those releases. See [asset notes](docs/assets/ATTRIBUTION.md).
+The project logo and badminton banner are original vector artwork under MIT. The README pixel illustration `docs/assets/neu-nanhu-pixel.png` was created for this project using CCS ImageGen with `gpt-image-2`, by editing an earlier AI-generated campus concept image without uploading real photographs, and is provided with the project under MIT. It is a stylized campus sports illustration, not a photograph or an official university emblem. Generation details and the editing prompt are recorded in the [asset notes](docs/assets/ATTRIBUTION.md).
+
+The former campus photograph has been removed from the current branch. Historical releases retain the notices distributed with those releases.
 
 ## Source-review references
 
