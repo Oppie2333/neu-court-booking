@@ -1,5 +1,11 @@
 # NEWS
 
+## 2026-10-19 · 项目介绍更新
+
+- 精简 README 视觉层级，添加章节图标，移除校门摄影素材及对应展示小节。
+- 补充适用范围：主要开发、测试南湖羽毛球馆预约，说明南湖 12 片场地与近期场地紧张情况；浑南馆尚未完成适配验证。
+- 本次仅更新项目介绍，程序仍为 v1.0.0 测试版。
+
 ## 2026-10-19 · v1.0.0 预发布
 
 首个可分发测试版。项目仓库为 [Oppie2333/neu-court-booking](https://github.com/Oppie2333/neu-court-booking)，运行包随 [v1.0.0 Release](https://github.com/Oppie2333/neu-court-booking/releases/tag/v1.0.0) 提供。

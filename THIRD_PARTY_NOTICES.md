@@ -16,7 +16,7 @@ When distributing a Windows build, retain the generated third-party license dire
 
 ## README artwork
 
-The campus photograph `docs/assets/neu-nanhu-gate.jpg` is a cropped and resized version of **Northeastern University South Lake Campus Gate in Shenyang 01.jpg**, by **Tomskyhaha**, from [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Northeastern_University_South_Lake_Campus_Gate_in_Shenyang_01.jpg). It is licensed separately under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), including the distributed crop. The project's MIT license does not replace that license. See [asset attribution](docs/assets/ATTRIBUTION.md) for source and modification details. The project logo and badminton banner are original vector artwork under MIT.
+The project logo and badminton banner are original vector artwork under MIT. The campus photograph has been removed from the current branch. Historical releases retain the notices distributed with those releases. See [asset notes](docs/assets/ATTRIBUTION.md).
 
 ## Source-review references
 
