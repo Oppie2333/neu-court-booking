@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-labelledby="title desc">
+  <title id="title">NEU Court Booking</title>
+  <desc id="desc">深蓝圆角方形中的白色羽毛球与薄荷绿场地线，项目原创标志。</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#10233f"/><stop offset="1" stop-color="#173e4c"/></linearGradient></defs>
+  <rect width="192" height="192" rx="48" fill="url(#bg)"/>
+  <path d="M30 144v18h116M46 162v-32m-16 14h116" fill="none" stroke="#70dec1" stroke-width="3" opacity=".55"/>
+  <g transform="translate(96 92) rotate(39)">
+    <path d="M-20 22-46-40q-4-14 5-16 9-1 12 14L-8 21Z" fill="#d1e9ef"/>
+    <path d="M-12 22-26-51q-2-13 7-14 9 0 9 14L1 21Z" fill="#f5fbff"/>
+    <path d="m-5 21-4-77q0-13 9-13t9 13L5 21Z" fill="#fff"/>
+    <path d="m1 21 9-72q1-14 10-14 9 1 6 14L12 22Z" fill="#eef9fc"/>
+    <path d="m8 21 21-63q4-15 12-14 9 3 5 16L20 22Z" fill="#cee9ee"/>
+    <path d="M-28-20Q0-9 28-20M-21 4Q0 10 21 4" fill="none" stroke="#7bb6c5" stroke-width="2"/>
+    <path d="M-20 18h40v12a20 20 0 0 1-40 0Z" fill="#fff"/>
+    <rect x="-21" y="14" width="42" height="9" rx="4" fill="#70dec1"/>
+  </g>
+</svg>
