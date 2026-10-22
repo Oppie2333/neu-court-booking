@@ -14,9 +14,10 @@ class BookingRulesTests(unittest.TestCase):
         from app_settings import default_config
         self.deployed_config = {**default_config(), 'target_date': '2026-10-19',
             'release_at': '2026-10-19T07:00:00+08:00', 'stop_at': '2026-10-19T07:15:00+08:00',
-            'paid_fallback': True, 'free_only': False, 'allow_other_free': True,
+            'booking_mode': 'free_first', 'paid_fallback': True, 'free_only': False, 'allow_other_free': True,
             'companions': [{'name': 'Test Companion', 'id': 'TEST001'}]}
-        self.config = {**self.deployed_config, 'free_only': True, 'paid_fallback': False, 'fallback_end': '18:00'}
+        self.config = {**self.deployed_config, 'booking_mode': 'free_only', 'free_only': True,
+                       'paid_fallback': False, 'fallback_end': '18:00'}
 
     def panel(self, slots, date='2026-10-19', name='1号羽毛球场'):
         return {'name': name, 'date': date, 'index': '0', 'slots': slots}
@@ -69,6 +70,37 @@ class BookingRulesTests(unittest.TestCase):
         self.assertEqual(poll_interval(10, 1, self.config), 2)
         self.assertEqual(poll_interval(10, 2, self.config), 4)
         self.assertEqual(poll_interval(10, 9, self.config), 8)
+
+    def test_custom_query_intervals_switch_at_exact_phase_boundaries(self):
+        config = {**self.config, 'fast_poll_seconds': 0.75, 'poll_seconds': 1.25,
+                  'slow_poll_seconds': 4.5}
+        validate_config(config)
+        for elapsed, expected in ((0, 0.75), (59.999, 0.75), (60, 1.25),
+                                  (179.999, 1.25), (180, 4.5), (900, 4.5)):
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(poll_interval(elapsed, 0, config), expected)
+
+    def test_query_backoff_never_accelerates_user_selected_slow_queries(self):
+        config = {**self.config, 'fast_poll_seconds': 10, 'poll_seconds': 6,
+                  'slow_poll_seconds': 60}
+        for elapsed, base in ((10, 10), (100, 6), (200, 60)):
+            for failures, backoff in ((1, 2), (2, 4), (3, 8), (9, 8)):
+                with self.subTest(elapsed=elapsed, failures=failures):
+                    self.assertEqual(poll_interval(elapsed, failures, config), max(base, backoff))
+
+    def test_direct_config_rejects_non_numeric_nonfinite_and_unsupported_query_intervals(self):
+        invalid = (None, True, False, '', '0.5', 'NaN', float('nan'),
+                   float('inf'), float('-inf'), 0, 0.499, 60.001, [], {})
+        for key in ('fast_poll_seconds', 'poll_seconds', 'slow_poll_seconds'):
+            for value in invalid:
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    validate_config({**self.config, key: value})
+
+    def test_direct_config_supports_independent_query_interval_boundaries(self):
+        for intervals in ((0.5, 60, 0.5), (60, 0.5, 60)):
+            changes = dict(zip(('fast_poll_seconds', 'poll_seconds', 'slow_poll_seconds'), intervals))
+            with self.subTest(intervals=intervals):
+                validate_config({**self.config, **changes})
 
     def test_paid_requires_grace_and_budget(self):
         panel = self.panel(['18:00-19:00 可用', '19:00-21:00 可用', '20:00-22:00 可用', '14:00-17:00 可用'])

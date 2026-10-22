@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from app_settings import VERSION, build_config, data_directory, load_preferences, save_preferences, task_summary
-from booking_rules import now
+from booking_rules import now, is_weekend, POLL_DEFAULTS
 from booking_runner import Runner
 
 STATES = {
@@ -38,8 +38,8 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.closing = False
         self.title(f'东大羽毛球预约助手 · {VERSION}')
-        self.geometry('940x850')
-        self.minsize(850, 790)
+        self.geometry(f'980x{min(940, self.winfo_screenheight() - 90)}')
+        self.minsize(850, 720)
         self.configure(padx=22, pady=16)
         self.option_add('*Font', ('Microsoft YaHei UI', 10))
         ttk.Style(self).configure('Title.TLabel', font=('Microsoft YaHei UI', 19, 'bold'))
@@ -53,29 +53,75 @@ class App(tk.Tk):
             config = default_config()
             self.after(100, lambda msg=str(error): messagebox.showwarning('本地设置', msg, parent=self))
         self.fields = {}
-        self.settings = ttk.Frame(self)
-        self.settings.pack(fill='x')
+        settings_area = ttk.Frame(self)
+        settings_area.pack(fill='both', expand=True, pady=(0, 10))
+        self.settings_canvas = tk.Canvas(settings_area, highlightthickness=0, borderwidth=0)
+        settings_scroll = ttk.Scrollbar(settings_area, orient='vertical', command=self.settings_canvas.yview)
+        self.settings_canvas.configure(yscrollcommand=settings_scroll.set)
+        settings_scroll.pack(side='right', fill='y')
+        self.settings_canvas.pack(side='left', fill='both', expand=True)
+        self.settings = ttk.Frame(self.settings_canvas)
+        settings_window = self.settings_canvas.create_window((0, 0), window=self.settings, anchor='nw')
+        self.settings.bind('<Configure>', lambda _: self.settings_canvas.configure(
+            scrollregion=self.settings_canvas.bbox('all')))
+        self.settings_canvas.bind('<Configure>', lambda event: self.settings_canvas.itemconfigure(
+            settings_window, width=event.width))
+        self.bind_all('<MouseWheel>', self.scroll_settings, add='+')
         task = ttk.LabelFrame(self.settings, text='1  任务时间（北京时间）', padding=12)
         task.pack(fill='x', pady=(0, 10))
         self.entry(task, '预约日期', 'target_date', config['target_date'], 0, 0, 14)
         self.entry(task, '放号时间', 'release_time', '07:00', 0, 2, 9)
-        self.entry(task, '运行分钟', 'duration_minutes', '15', 0, 4, 7)
+        self.entry(task, '运行时长（分钟）', 'duration_minutes', '15', 0, 4, 7)
         ttk.Label(task, text='日期格式：2026-10-20；仅执行所选一天，最多预约一场。',
                   foreground='#536579').grid(row=1, column=0, columnspan=6, sticky='w', pady=(8, 0))
         slots = ttk.LabelFrame(self.settings, text='2  时段与预算', padding=12)
         slots.pack(fill='x', pady=(0, 10))
-        self.entry(slots, '免费首选', 'preferred_slot', config['preferred_slot'], 0, 0, 17)
-        self.paid = tk.BooleanVar(value=config['paid_fallback'])
-        ttk.Checkbutton(slots, text='允许付费备选（1或2小时，每小时15元）', variable=self.paid,
-                        command=self.toggle_paid).grid(row=0, column=2, columnspan=4, sticky='w', padx=12)
-        self.entry(slots, '备选开始', 'fallback_start', config['fallback_start'], 1, 0, 9)
-        self.entry(slots, '备选结束', 'fallback_end', config['fallback_end'], 1, 2, 9)
-        self.entry(slots, '最多金额', 'max_price_yuan', str(config['max_price_yuan']), 1, 4, 7)
-        self.entry(slots, '放号后几秒启用付费', 'paid_fallback_after_seconds',
-                   str(config['paid_fallback_after_seconds']), 2, 0, 9)
-        ttk.Label(slots, text='付费场完整落在备选范围内；最终付款由本人完成。', foreground='#536579').grid(
-            row=2, column=2, columnspan=4, sticky='w', padx=12)
-        people = ttk.LabelFrame(self.settings, text='3  同行人（不含本人，填写1–5位）', padding=12)
+        self.weekday_mode = config['booking_mode']
+        self.was_weekend = None
+        self.mode = tk.StringVar(value=self.weekday_mode)
+        mode_choices = ttk.Frame(slots)
+        mode_choices.grid(row=0, column=0, sticky='w', pady=(0, 8))
+        ttk.Label(mode_choices, text='预约模式').pack(side='left', padx=(0, 15))
+        self.mode_buttons = {}
+        for key, label in (('free_only', '只抢免费场'), ('free_first', '免费优先，允许付费备选'),
+                           ('paid_only', '只抢付费场')):
+            button = ttk.Radiobutton(mode_choices, text=label, variable=self.mode, value=key,
+                                     command=self.update_booking_mode)
+            button.pack(side='left', padx=(0, 20))
+            self.mode_buttons[key] = button
+        self.day_mode = ttk.Label(slots, foreground='#245a96', wraplength=820)
+        self.day_mode.grid(row=1, column=0, sticky='w', pady=(0, 6))
+        self.free_settings = ttk.Frame(slots)
+        self.free_settings.grid(row=2, column=0, sticky='w')
+        self.entry(self.free_settings, '优先预约的免费打球时段', 'preferred_slot', config['preferred_slot'], 0, 0, 17)
+        ttk.Label(self.free_settings,
+                  text='由你核实学校免费时间后填写，格式 HH:MM-HH:MM；15:30-17:00 只是常用预填值。',
+                  foreground='#536579', wraplength=820).grid(row=1, column=0, columnspan=2, sticky='w', pady=(3, 5))
+        self.free_first_settings = ttk.Frame(slots)
+        self.free_first_settings.grid(row=3, column=0, sticky='w', pady=(0, 5))
+        self.entry(self.free_first_settings, '先只抢免费场（秒）', 'paid_fallback_after_seconds',
+                   str(config['paid_fallback_after_seconds']), 0, 0, 9)
+        self.free_first_help = ttk.Label(self.free_first_settings, foreground='#245a96', wraplength=820)
+        self.free_first_help.grid(row=1, column=0, columnspan=2, sticky='w', pady=(3, 4))
+        self.paid_settings = ttk.Frame(slots)
+        self.paid_settings.grid(row=4, column=0, sticky='w', pady=(3, 0))
+        self.entry(self.paid_settings, '付费场最早开始', 'fallback_start', config['fallback_start'], 0, 0, 9)
+        self.entry(self.paid_settings, '最晚结束', 'fallback_end', config['fallback_end'], 0, 2, 9)
+        self.entry(self.paid_settings, '每场上限（元）', 'max_price_yuan', str(config['max_price_yuan']), 0, 4, 7)
+        ttk.Label(self.paid_settings,
+                  text='例如14:00–21:00：场次不早于14点开始、不晚于21点结束。范围内下午优先；每场1或2小时，由本人付款。',
+                  foreground='#536579', wraplength=820).grid(row=1, column=0, columnspan=6, sticky='w', pady=(3, 0))
+        speed = ttk.LabelFrame(self.settings, text='3  查询间隔（秒）', padding=12)
+        speed.pack(fill='x', pady=(0, 10))
+        self.entry(speed, '放号后0–60秒', 'fast_poll_seconds', f"{config['fast_poll_seconds']:g}", 0, 0, 7)
+        self.entry(speed, '60–180秒', 'poll_seconds', f"{config['poll_seconds']:g}", 0, 2, 7)
+        self.entry(speed, '180秒以后', 'slow_poll_seconds', f"{config['slow_poll_seconds']:g}", 0, 4, 7)
+        ttk.Button(speed, text='恢复推荐值', command=self.reset_query_intervals).grid(row=0, column=6, padx=(0, 4))
+        ttk.Label(speed, text='推荐 0.5 / 1 / 3 秒：前60秒最多每秒查2次，之后每秒1次、每3秒1次。',
+                  foreground='#245a96').grid(row=1, column=0, columnspan=7, sticky='w', pady=(6, 0))
+        ttk.Label(speed, text='数值越小，查询越频繁；可填0.5–60秒。每次查询完成后才会再查，繁忙时自动放慢。',
+                  foreground='#536579').grid(row=2, column=0, columnspan=7, sticky='w', pady=(3, 0))
+        people = ttk.LabelFrame(self.settings, text='4  同行人（不含本人，填写1–5位）', padding=12)
         people.pack(fill='x', pady=(0, 10))
         ttk.Label(people, text='姓名').grid(row=0, column=1, sticky='w')
         ttk.Label(people, text='统一认证账号 / 学号 / 工号').grid(row=0, column=2, sticky='w')
@@ -107,14 +153,16 @@ class App(tk.Tk):
         self.clock = ttk.Label(self, text='', foreground='#536579')
         self.clock.pack(anchor='w', pady=(0, 6))
         log_frame = ttk.Frame(self)
-        log_frame.pack(fill='both', expand=True)
-        self.log = tk.Text(log_frame, height=7, wrap='word', state='disabled', relief='flat',
+        log_frame.pack(fill='x')
+        self.log = tk.Text(log_frame, height=4, wrap='word', state='disabled', relief='flat',
                            background='#f4f7fb', padx=10, pady=8, font=('Microsoft YaHei UI', 9))
         scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side='left', fill='both', expand=True)
         scroll.pack(side='right', fill='y')
-        self.toggle_paid()
+        self.update_booking_mode()
+        for key in ('target_date', 'preferred_slot', 'paid_fallback_after_seconds'):
+            self.fields[key][0].trace_add('write', self.update_booking_mode)
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.after(100, self.tick)
 
@@ -125,9 +173,75 @@ class App(tk.Tk):
         widget.grid(row=row, column=column+1, sticky='w', padx=(0, 15), pady=4)
         self.fields[key] = (var, widget)
 
-    def toggle_paid(self):
-        for key in ('fallback_start', 'fallback_end', 'max_price_yuan', 'paid_fallback_after_seconds'):
-            self.fields[key][1].configure(state='normal' if self.paid.get() else 'disabled')
+    def scroll_settings(self, event):
+        widget = event.widget
+        while widget is not None:
+            if widget is self.settings or widget is self.settings_canvas:
+                if self.settings.winfo_height() > self.settings_canvas.winfo_height():
+                    self.settings_canvas.yview_scroll(-int(event.delta / 120), 'units')
+                    return 'break'
+                return
+            widget = widget.master
+
+    def reset_query_intervals(self):
+        for key, value in POLL_DEFAULTS.items():
+            self.fields[key][0].set(f'{value:g}')
+
+    def update_booking_mode(self, *_):
+        try:
+            target_date = self.fields['target_date'][0].get().strip()
+            weekend = is_weekend(target_date)
+        except ValueError:
+            self.day_mode.configure(text='请填写完整预约日期（YYYY-MM-DD）。')
+            self.day_mode.grid()
+            for button in self.mode_buttons.values():
+                button.configure(state='disabled')
+            for widget in (self.free_settings, self.free_first_settings, self.paid_settings):
+                widget.grid_remove()
+            return
+        if weekend:
+            if self.was_weekend is False:
+                self.weekday_mode = self.mode.get()
+            self.mode.set('paid_only')
+        else:
+            if self.was_weekend is True:
+                self.mode.set(self.weekday_mode)
+            self.weekday_mode = self.mode.get()
+        self.was_weekend = weekend
+        selected = self.mode.get()
+        running = bool(self.runner and self.runner.thread.is_alive())
+        for key, button in self.mode_buttons.items():
+            button.configure(state='disabled' if running or (weekend and key != 'paid_only') else 'normal')
+        for widget, visible in ((self.free_settings, selected != 'paid_only'),
+                                (self.free_first_settings, selected == 'free_first'),
+                                (self.paid_settings, selected != 'free_only')):
+            widget.grid() if visible else widget.grid_remove()
+        slot = self.fields['preferred_slot'][0].get().strip() or '你填写的免费时段'
+        if selected == 'paid_only':
+            explanation = '放号起直接查下方范围内的付费场，下午优先；抢到一场即停止。'
+        elif selected == 'free_only':
+            explanation = '只抢你填写的免费打球时段，抢到一场即停止；不考虑付费场。'
+        else:
+            try:
+                seconds = int(self.fields['paid_fallback_after_seconds'][0].get())
+                if not 0 <= seconds <= 300:
+                    raise ValueError
+            except ValueError:
+                explanation = ('请填0–300的整数秒数。例如填15：放号后的前15秒只抢免费场；'
+                               '15秒后免费仍优先，也可抢付费场。')
+            else:
+                if seconds:
+                    explanation = (f'放号后的前{seconds}秒：只抢免费打球时段 {slot}。\n'
+                                   f'{seconds}秒后：免费仍优先，也可抢下方付费场；抢到任意一场即停止。')
+                else:
+                    explanation = (f'从放号起：优先抢免费打球时段 {slot}，也可抢下方付费场。\n'
+                                   '抢到任意一场即停止。')
+            self.free_first_help.configure(text=explanation)
+        if selected == 'free_first':
+            self.day_mode.grid_remove()
+        else:
+            self.day_mode.configure(text=explanation)
+            self.day_mode.grid()
 
     def publish(self, message): self.events.put(('log', message))
 
@@ -172,7 +286,7 @@ class App(tk.Tk):
             return
         try:
             values = {key: var.get() for key, (var, _) in self.fields.items()}
-            values.update(paid_fallback=self.paid.get(), auto_accept_terms=self.auto_terms.get(),
+            values.update(booking_mode=self.weekday_mode, auto_accept_terms=self.auto_terms.get(),
                           companions=[{'name': name.get(), 'id': number.get()} for name, number in self.people])
             config = build_config(values)
             summary = task_summary(config)
@@ -190,7 +304,7 @@ class App(tk.Tk):
             messagebox.showerror('请检查设置', str(error), parent=self)
 
     def set_editable(self, widget, enabled):
-        if isinstance(widget, (ttk.Entry, ttk.Checkbutton)):
+        if isinstance(widget, (ttk.Entry, ttk.Checkbutton, ttk.Radiobutton, ttk.Button)):
             widget.configure(state='normal' if enabled else 'disabled')
         for child in widget.winfo_children():
             self.set_editable(child, enabled)
@@ -229,7 +343,7 @@ class App(tk.Tk):
                 self.stop_button.configure(state='disabled')
                 for child in self.settings.winfo_children():
                     self.set_editable(child, True)
-                self.toggle_paid()
+                self.update_booking_mode()
         while True:
             try:
                 kind, value = self.events.get_nowait()

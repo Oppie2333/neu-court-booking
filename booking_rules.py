@@ -1,13 +1,55 @@
 """Strict target selection; no network or browser side effects."""
+import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 CHINA = timezone(timedelta(hours=8))
 TIME_RE = re.compile(r'(?<!\d)(\d{1,2}):(\d{2})\s*[-—–~～至]\s*(\d{1,2}):(\d{2})(?!\d)')
+POLL_DEFAULTS = {'fast_poll_seconds': 0.5, 'poll_seconds': 1, 'slow_poll_seconds': 3}
+BOOKING_MODES = ('free_only', 'free_first', 'paid_only')
+
+
+def query_interval(value):
+    """Normalize editable intervals and reject non-finite or unsupported values."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError('查询间隔请填0.5–60之间的秒数，例如0.5、1或3。') from error
+    if not math.isfinite(seconds) or not 0.5 <= seconds <= 60:
+        raise ValueError('查询间隔请填0.5–60之间的秒数，例如0.5、1或3。')
+    return seconds
 
 
 def now():
     return datetime.now(CHINA)
+
+
+def is_weekend(target_date):
+    """Use the booking date, not the date on which the assistant is opened."""
+    return date.fromisoformat(target_date).weekday() >= 5
+
+
+def preferred_booking_mode(config):
+    """Stored weekday choice; migrate the old checkbox only when mode is absent."""
+    mode = config.get('booking_mode', 'free_first' if config.get('paid_fallback') is True else 'free_only')
+    if mode not in BOOKING_MODES:
+        raise ValueError('请选择预约模式：只抢免费场、免费优先允许付费备选，或只抢付费场。')
+    return mode
+
+
+def booking_mode(config):
+    preferred = preferred_booking_mode(config)
+    return 'paid_only' if is_weekend(config['target_date']) else preferred
+
+
+def paid_enabled(config):
+    return booking_mode(config) != 'free_only'
+
+
+def paid_delay_seconds(config):
+    return config.get('paid_fallback_after_seconds', 15) if booking_mode(config) == 'free_first' else 0
 
 
 def minutes(value):
@@ -42,6 +84,8 @@ def explicit_free(label):
 
 
 def candidates(panels, config, allow_paid=False):
+    mode = booking_mode(config)
+    preferred = None if mode == 'paid_only' else parse_slot(config.get('preferred_slot', ''))
     selected = []
     for panel in panels:
         if panel.get('date') != config['target_date']:
@@ -56,10 +100,13 @@ def candidates(panels, config, allow_paid=False):
             if not parsed:
                 continue
             slot, start, end = parsed
-            primary = slot == config['preferred_slot'] and free
+            # Paid-only mode excludes all free slots, even if free fallback was enabled in an old config.
+            if mode == 'paid_only' and free:
+                continue
+            primary = bool(preferred and slot == preferred[0] and free)
             fallback = minutes(config['fallback_start']) <= start < end <= minutes(config['fallback_end'])
             estimated_price = 0 if free else (end - start) * config.get('student_hourly_rate_yuan', 15) / 60
-            paid = (not free and '免' not in label and allow_paid and config.get('paid_fallback') is True
+            paid = (not free and '免' not in label and allow_paid and paid_enabled(config)
                     and config.get('free_only') is False and fallback
                     and end - start in config.get('paid_durations_minutes', [60, 120])
                     and 0 < estimated_price <= config.get('max_price_yuan', 0))
@@ -67,19 +114,22 @@ def candidates(panels, config, allow_paid=False):
             amounts = re.findall(r'(?:[¥￥]\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*元)', label)
             if amounts and any(float(a or b) != estimated_price for a, b in amounts):
                 continue
-            free_fallback = (free and fallback and not config.get('paid_fallback', False)
+            free_fallback = (mode == 'free_only' and free and fallback
                              and config.get('allow_other_free', True))
             if not (primary or paid or free_fallback):
                 continue
             selected.append({**panel, 'label': label, 'slot': slot,
                              'form_slot': re.sub(r'\s*可用\s*', '', label).strip(),
                              'is_free': free, 'estimated_price_yuan': estimated_price,
-                             'rank': (0 if primary else 1, abs(start - minutes(config['preferred_slot'].split('-')[0])),
+                             'rank': (0 if primary else 1,
+                                      0 if free or 12 * 60 <= start < 18 * 60 else 1,
+                                      start if mode == 'paid_only' else abs(start - preferred[1]),
                                       -int(re.search(r'\d+', panel['name']).group()))})
     return sorted(selected, key=lambda value: value['rank'])
 
 
 def validate_config(config):
+    mode = booking_mode(config)
     release = datetime.fromisoformat(config['release_at'])
     stop = datetime.fromisoformat(config['stop_at'])
     if release.tzinfo is None or stop.tzinfo is None:
@@ -87,7 +137,7 @@ def validate_config(config):
     if (stop.astimezone(CHINA).date().isoformat() != config['target_date']
             or config.get('booking_url', '') != 'https://book.neu.edu.cn/booking/page/rule/stadium/ypg_ymb'):
         raise ValueError('截止日期或场馆入口无效')
-    if (not parse_slot(config.get('preferred_slot', ''))
+    if ((mode != 'paid_only' and not parse_slot(config.get('preferred_slot', '')))
             or minutes(config['fallback_start']) >= minutes(config['fallback_end'])):
         raise ValueError('首选时段或备选时间范围无效')
     if release.astimezone(CHINA).date().isoformat() != config['target_date']:
@@ -96,14 +146,21 @@ def validate_config(config):
         raise ValueError('运行截止时间无效')
     if config.get('max_successful_bookings') != 1:
         raise ValueError('本任务只允许一场预约')
-    if config.get('free_only') is not True:
-        if (config.get('paid_fallback') is not True or config.get('payment_mode') != 'manual'
+    if is_weekend(config['target_date']) and config.get('free_only') is not False:
+        raise ValueError('周六、周日只预约付费场，请重新确认本次时段与预算')
+    if config.get('free_only') is not (mode == 'free_only'):
+        raise ValueError('预约模式与收费设置不一致，请重新确认本次模式。')
+    if paid_enabled(config):
+        if (not paid_enabled(config) or config.get('payment_mode') != 'manual'
                 or not 0 < config.get('max_price_yuan', 0) <= 30
                 or config.get('student_hourly_rate_yuan') != 15
                 or config.get('paid_durations_minutes') != [60, 120]):
             raise ValueError('付费备选仅限每小时15元、1或2小时、最多30元且手动付款')
-    if min(config.get('poll_seconds', 0), config.get('fast_poll_seconds', 0.5), config.get('slow_poll_seconds', 3)) < 0.5:
-        raise ValueError('查询启动间隔至少为0.5秒，且只允许单个请求串行执行')
+    for key, default in POLL_DEFAULTS.items():
+        value = config.get(key, default)
+        if not isinstance(value, (int, float)):
+            raise ValueError('查询间隔应为0.5–60之间的数值。')
+        query_interval(value)
     if (not 0.5 <= config.get('confirmation_retry_seconds', 0.5) <= config.get('confirmation_max_backoff_seconds', 2) <= 8
             or (config.get('confirmation_max_attempts') is not None
                 and not 1 <= config['confirmation_max_attempts'] <= 60)
@@ -117,10 +174,13 @@ def validate_config(config):
 
 
 def poll_interval(seconds_since_release, failures, config):
-    if failures:
-        return min(config.get('max_backoff_seconds', 8), 2 ** min(failures, 4))
     if seconds_since_release < config.get('fast_window_seconds', 60):
-        return config.get('fast_poll_seconds', 0.5)
-    if seconds_since_release < config.get('slow_after_seconds', 180):
-        return config['poll_seconds']
-    return config.get('slow_poll_seconds', 3)
+        interval = config.get('fast_poll_seconds', POLL_DEFAULTS['fast_poll_seconds'])
+    elif seconds_since_release < config.get('slow_after_seconds', 180):
+        interval = config.get('poll_seconds', POLL_DEFAULTS['poll_seconds'])
+    else:
+        interval = config.get('slow_poll_seconds', POLL_DEFAULTS['slow_poll_seconds'])
+    interval = query_interval(interval)
+    if failures:
+        return max(interval, min(config.get('max_backoff_seconds', 8), 2 ** min(failures, 4)))
+    return interval

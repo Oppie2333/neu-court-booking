@@ -1,6 +1,6 @@
 # 发布到 GitHub
 
-本文件以 **1.0.0**（**2026-10-19**）的 **预发布（pre-release）** 为例，说明本地 Git、源码上传与运行包发布流程。目标仓库为 [Oppie2333/neu-court-booking](https://github.com/Oppie2333/neu-court-booking)。已有仓库请从对应步骤继续，勿重复初始化。
+本文件以 **1.1.0**（**2026-10-23**）的 **预发布测试版（pre-release）** 为例，说明本地 Git、源码上传与运行包发布流程。目标仓库为 [Oppie2333/neu-court-booking](https://github.com/Oppie2333/neu-court-booking)。已有仓库请从对应步骤继续，勿重复初始化。
 
 ## 发布源码
 
@@ -19,7 +19,7 @@ git add .
 git status --short
 git diff --cached --stat
 git diff --cached
-git commit -m "Prepare v1.0.0 prerelease"
+git commit -m "Release v1.1.0"
 git remote add origin https://github.com/Oppie2333/neu-court-booking.git
 git push -u origin main
 ```
@@ -49,9 +49,9 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -Python .venv/Scripts
 将完整目录压缩成当前版本运行包，并生成配套校验值：
 
 ```powershell
-Compress-Archive -LiteralPath dist/NEUCourtBooking -DestinationPath NEUCourtBooking-1.0.0-windows-x64.zip
-$packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.0.0-windows-x64.zip).Hash.ToLowerInvariant()
-"$packageHash  NEUCourtBooking-1.0.0-windows-x64.zip" | Set-Content -Encoding ascii SHA256SUMS.txt
+Compress-Archive -LiteralPath dist/NEUCourtBooking -DestinationPath NEUCourtBooking-1.1.0-windows-x64.zip
+$packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.1.0-windows-x64.zip).Hash.ToLowerInvariant()
+"$packageHash  NEUCourtBooking-1.1.0-windows-x64.zip" | Set-Content -Encoding ascii SHA256SUMS.txt
 ```
 
 保留程序目录中的 `_internal`、使用说明和 `third_party_licenses` 等文件，不要只上传 exe。源码可用 GitHub 自动提供的源码压缩包，Windows zip 作为独立附件上传。代码提交时不提交 `dist`、构建缓存和虚拟环境。
@@ -74,15 +74,15 @@ $packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.0.0-windows-x64
 确认源码与最终产物一致后，创建并推送当前版本标签：
 
 ```powershell
-git tag -a v1.0.0 -m "v1.0.0 prerelease"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "v1.1.0 prerelease"
+git push origin v1.1.0
 ```
 
 在目标仓库打开 **Releases → Draft a new release**：
 
-1. 选择标签 `v1.0.0`，标题填写 `v1.0.0 · 首个可分发测试版`。
+1. 选择标签 `v1.1.0`，标题填写 `v1.1.0 · 三种预约模式与查询间隔设置`。
 2. 复制 [.github/RELEASE_TEMPLATE.md](../.github/RELEASE_TEMPLATE.md) 正文，核对日期、验证结果及附件。
-3. 上传完整 `NEUCourtBooking-1.0.0-windows-x64.zip` 和对应的 `SHA256SUMS.txt`。整理后的源码 zip 可作为额外附件；GitHub 也会提供标签对应的源码下载。
+3. 上传完整 `NEUCourtBooking-1.1.0-windows-x64.zip` 和对应的 `SHA256SUMS.txt`。整理后的源码 zip 可作为额外附件；GitHub 也会提供标签对应的源码下载。
 4. 勾选 **Set as a pre-release**，核对后再发布。
 
 不要把个人数据、日志或内存转储当作 Release 附件。

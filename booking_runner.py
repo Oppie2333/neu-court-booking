@@ -20,7 +20,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, Ses
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from booking_rules import now, candidates, validate_config, poll_interval
+from booking_rules import now, candidates, validate_config, poll_interval, booking_mode, paid_delay_seconds
 
 PANEL_SCRIPT = """
 return Array.from(document.querySelectorAll('div.selectList.sectionNotes')).map(p => ({
@@ -98,7 +98,7 @@ class Runner:
 
     def current_candidates(self, panels):
         return candidates(panels, self.config, allow_paid=(now() - self.release).total_seconds()
-                          >= self.config.get('paid_fallback_after_seconds', 15))
+                          >= paid_delay_seconds(self.config))
 
     def prepare(self):
         self.report('STARTING', '正在打开学校预约浏览器，请在学校页面登录。')
@@ -140,7 +140,9 @@ class Runner:
                                 self.publish('本次已授权自动勾选当前条款；内容变化时暂停。')
                     self.prepared = True
                     self.last_keepalive = time.monotonic()
-                    self.report('ARMED', f'已启用 {self.config["target_date"]} {self.release:%H:%M} 任务，免费首选 {self.config["preferred_slot"]}，最多一场。')
+                    preference = ('只抢付费场，放号即查，下午优先' if booking_mode(self.config) == 'paid_only'
+                                  else f'免费首选 {self.config["preferred_slot"]}')
+                    self.report('ARMED', f'已启用 {self.config["target_date"]} {self.release:%H:%M} 任务，{preference}，最多一场。')
                     self.publish('单次任务已启用；放号后按限定间隔串行查询，繁忙时延长间隔。')
                     if self.config.get('auto_accept_terms'):
                         self.publish('当前学校条款已核对；根据你的明确授权，预约时会自动勾选，付款仍由你手动完成。')
@@ -159,8 +161,8 @@ class Runner:
             panels = self.check_target_page()
             if panels is None:
                 raise Halt('登录已失效，请重新登录。')
-            matches = candidates(panels, self.config)
-            self.publish(f'只读检查：日期正确，{len(panels)}块场地，当前符合条件的免费场次{len(matches)}个。')
+            matches = self.current_candidates(panels)
+            self.publish(f'只读检查：日期正确，{len(panels)}块场地，当前符合条件的场次{len(matches)}个。')
 
     def wait_until_release(self):
         while not self.stop.is_set() and now() < self.release:
@@ -205,7 +207,7 @@ class Runner:
         if '展开预约' in expand.text:
             expand.click()
         # This site stores its selected time in a span, as in both reviewed projects.
-        # Only an actual current free option is copied into that display field.
+        # Only an actual current option within the confirmed scope is copied.
         trigger = self.driver.find_element(By.ID, f'trigger{index}')
         self.driver.execute_script('arguments[0].textContent = arguments[1];', trigger, exact['form_slot'])
         for position, companion in enumerate(self.config['companions']):
