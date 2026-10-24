@@ -1,17 +1,24 @@
 from pathlib import Path
 import sys
 import unittest
+import json
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from school_confirmation import result_state, finish_if_verified, terms_fingerprint, dismiss_school_alerts
-from creation_watch import creation_outcome
+from school_confirmation import result_state, finish_if_verified, terms_fingerprint, dismiss_school_alerts, school_dialog_origin
+from creation_watch import creation_outcome, business_failure
 from booking_rules import now
 from selenium.common.exceptions import NoAlertPresentException, WebDriverException
 
 SELECTION = {'name': '6号羽毛球场', 'date': '2026-10-19', 'slot': '15:30-17:00',
              'is_free': True, 'estimated_price_yuan': 0, 'index': '5', 'form_slot': '15:30-17:00(学免)'}
+
+
+def fixture_dialog_origin(driver):
+    # Pure Python fixture metadata; production reads the owned browser's loopback metadata.
+    return urlparse(driver._url if hasattr(driver, '_url') else driver.current_url).hostname
 
 
 class Element:
@@ -40,7 +47,7 @@ class Driver:
         self.suppress_alert = False
     @property
     def alert(self):
-        if self.pending_alert:
+        if self.pending_alert is not None:
             return SimpleNamespace(text=self.pending_alert, accept=self.accept_alert)
         raise NoAlertPresentException()
     def accept_alert(self):
@@ -68,23 +75,31 @@ class Stop:
 
 
 class RepeatingAlertDriver(Driver):
-    def __init__(self, counts, accept_failures=0):
+    def __init__(self, counts, accept_failures=0, read_failures=0):
         super().__init__(True)
         self.alert_counts = list(counts)
         self.accept_failures = accept_failures
+        self.read_failures = read_failures
         self.remaining = 0
         self.events = []
 
     @property
+    def alert(self):
+        if self.pending_alert is not None and self.read_failures:
+            self.read_failures -= 1
+            raise WebDriverException('Browser busy reading dialog')
+        return super().alert
+
+    @property
     def current_url(self):
-        assert not getattr(self, 'pending_alert', None), 'Do not read DOM/URL before all dialogs close'
+        assert getattr(self, 'pending_alert', None) is None, 'Do not read DOM/URL before all dialogs close'
         return self._url
 
     @current_url.setter
     def current_url(self, value): self._url = value
 
     def created(self):
-        assert not self.pending_alert, 'Do not submit while an error dialog remains'
+        assert self.pending_alert is None, 'Do not submit while an error dialog remains'
         self.events.append('submit')
         self.remaining = self.alert_counts.pop(0) if self.alert_counts else 0
         super().created()
@@ -114,6 +129,9 @@ class ConfirmationTests(unittest.TestCase):
         self.watcher = patch('school_confirmation.CreationWatch', FakeWatch)
         self.watcher.start()
         self.addCleanup(self.watcher.stop)
+        origin = patch('school_confirmation.school_dialog_origin', side_effect=fixture_dialog_origin)
+        origin.start()
+        self.addCleanup(origin.stop)
     def test_paid_gateway_is_not_success(self):
         self.assertEqual(result_state('https://pay.neu.edu.cn/PayPreService/showselect', '', {**SELECTION, 'is_free': False})[0], 'PAYMENT_STARTING')
     def test_free_gateway_and_excess_amount_need_review(self):
@@ -189,13 +207,86 @@ class ConfirmationTests(unittest.TestCase):
 
     def test_repeated_dialog_confirmations_finish_before_each_resubmission(self):
         runner, reports = self.runner(True)
-        runner.driver = RepeatingAlertDriver([4, 3], accept_failures=2)
+        runner.driver = RepeatingAlertDriver([4, 3], accept_failures=2, read_failures=3)
         runner.driver.responses = [{'status': 200, 'code': 1, 'message': '网络异常，请稍后再试'}] * 2
         self.assertTrue(finish_if_verified(runner))
         self.assertEqual(runner.driver.events,
                          ['submit'] + ['confirm'] * 6 + ['submit'] + ['confirm'] * 3 + ['submit'])
         self.assertEqual(runner.driver.button.clicks, 3)
         self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_explicit_busy_alert_without_numeric_business_code_retries_same_form(self):
+        runner, reports = self.runner(True)
+        runner.driver.responses = [{'status': 200, 'code': None, 'message': '系统繁忙，请稍后重试'}] * 3
+        self.assertTrue(finish_if_verified(runner))
+        self.assertEqual(runner.driver.button.clicks, 4)
+        self.assertEqual(runner.driver.accepted_alerts, 3)
+        self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_arbitrary_alert_without_numeric_business_code_reconciles(self):
+        for message in ('', '其他提醒'):
+            runner, reports = self.runner(True)
+            runner.driver.responses = [{'status': 200, 'code': None, 'message': message}]
+            self.assertTrue(finish_if_verified(runner))
+            self.assertEqual(runner.driver.button.clicks, 1)
+            self.assertEqual(runner.driver.accepted_alerts, 1)
+            self.assertIn('CHECKING_ORDER', [report[0] for report in reports])
+            self.assertEqual(reports[-1][0], 'NEEDS_REVIEW')
+
+    def test_generic_completed_business_failure_retries_without_busy_wording(self):
+        runner, reports = self.runner(True)
+        runner.driver.responses = [{'status': 200, 'code': 7, 'message': '上游响应未完成，请再次操作'}] * 8
+        self.assertTrue(finish_if_verified(runner))
+        self.assertEqual(runner.driver.button.clicks, 9)
+        self.assertEqual(runner.driver.accepted_alerts, 8)
+        self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_missing_numeric_response_without_explicit_alert_is_reconciled(self):
+        runner, reports = self.runner(True)
+        runner.driver.suppress_alert = True
+        runner.driver.responses = [{'status': 200, 'code': None, 'message': '系统繁忙'}]
+        self.assertTrue(finish_if_verified(runner))
+        self.assertEqual(runner.driver.button.clicks, 1)
+        self.assertIn('CHECKING_ORDER', [report[0] for report in reports])
+        self.assertEqual(reports[-1][0], 'NEEDS_REVIEW')
+
+    def test_retry_waits_for_newly_pending_request_before_arming(self):
+        class TemporarilyBusyWatch(FakeWatch):
+            def __init__(self, driver):
+                super().__init__(driver)
+                self.calls = 0
+            def arm(self):
+                self.calls += 1
+                return self.calls != 2
+            def snapshot(self):
+                return {**super().snapshot(), 'active': int(self.calls == 2)}
+        runner, reports = self.runner(True)
+        runner.driver.responses = [{'status': 200, 'code': 1, 'message': '系统繁忙'}]
+        with patch('school_confirmation.CreationWatch', TemporarilyBusyWatch):
+            self.assertTrue(finish_if_verified(runner))
+        self.assertEqual(runner.driver.button.clicks, 2)
+        self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_paid_transition_waits_until_all_busy_dialogs_are_confirmed(self):
+        runner, _ = self.runner(True)
+        runner.submission.update(is_free=False, estimated_price_yuan=15)
+        driver = RepeatingAlertDriver([5, 4])
+        driver.responses = [{'status': 200, 'code': 1, 'message': '系统繁忙'}] * 2
+        original = driver.created
+
+        def created():
+            if not driver.responses:
+                driver.current_url = 'https://pay.neu.edu.cn/PayPreService/showselect'
+            else:
+                original()
+
+        driver.button.callback = created
+        runner.driver = driver
+        with patch('school_confirmation.continue_payment', return_value=True) as payment:
+            self.assertTrue(finish_if_verified(runner))
+            payment.assert_called_once_with(runner)
+        self.assertEqual(driver.accepted_alerts, 9)
+        self.assertEqual(driver.button.clicks, 3)
 
     def test_default_confirmation_loop_continues_past_old_thirty_attempt_limit(self):
         runner, reports = self.runner(True)
@@ -223,13 +314,53 @@ class ConfirmationTests(unittest.TestCase):
         self.assertFalse(cleared)
         self.assertEqual(runner.driver.accepted_alerts, 0)
 
-    def test_unknown_dialog_is_kept_for_review(self):
+    def test_stop_or_deadline_during_origin_lookup_does_not_accept_dialog(self):
+        for expired in (False, True):
+            runner, _ = self.runner(True)
+            runner.driver.pending_alert = ''
+            def origin(driver):
+                if expired: runner.deadline = now() - timedelta(seconds=1)
+                else: runner.stop.stopped = True
+                return 'book.neu.edu.cn'
+            with patch('school_confirmation.school_dialog_origin', side_effect=origin):
+                cleared, _ = dismiss_school_alerts(runner)
+            self.assertFalse(cleared)
+            self.assertEqual(runner.driver.accepted_alerts, 0)
+
+    def test_arbitrary_validation_dialog_is_confirmed_then_visible_terms_continue(self):
         runner, reports = self.runner(True)
         runner.driver.pending_alert = '需要确认其他操作'
         self.assertTrue(finish_if_verified(runner))
-        self.assertEqual(runner.driver.accepted_alerts, 0)
+        self.assertEqual(runner.driver.accepted_alerts, 1)
+        self.assertEqual(runner.driver.button.clicks, 1)
+        self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_existing_booking_notice_is_confirmed_then_reconciled_without_retry(self):
+        runner, reports = self.runner(True)
+        runner.driver.pending_alert = '今天已经预约羽乒馆-10号羽毛球场'
+        self.assertTrue(finish_if_verified(runner))
+        self.assertEqual(runner.driver.accepted_alerts, 1)
         self.assertEqual(runner.driver.button.clicks, 0)
         self.assertEqual(reports[-1][0], 'NEEDS_REVIEW')
+
+    def test_repeated_arbitrary_and_empty_dialogs_are_all_confirmed(self):
+        for message in ('', '稍等一下再点', '网络出了点问题', '其他信息'):
+            runner, reports = self.runner(True)
+            runner.driver = RepeatingAlertDriver([4, 3], read_failures=1, accept_failures=1)
+            runner.driver.responses = [{'status': 200, 'code': 2, 'message': message}] * 2
+            self.assertTrue(finish_if_verified(runner))
+            self.assertEqual(runner.driver.accepted_alerts, 7)
+            self.assertEqual(runner.driver.button.clicks, 3)
+            self.assertEqual(reports[-1][0], 'CONFIRMED')
+
+    def test_completed_existing_booking_and_fatal_responses_never_retry(self):
+        for message in ('今天已经预约羽乒馆-10号羽毛球场', '请重新登录', '无权限预约', '参数错误'):
+            runner, reports = self.runner(True)
+            runner.driver.responses = [{'status': 200, 'code': 1, 'message': message}]
+            self.assertTrue(finish_if_verified(runner))
+            self.assertEqual(runner.driver.accepted_alerts, 1)
+            self.assertEqual(runner.driver.button.clicks, 1)
+            self.assertEqual(reports[-1][0], 'NEEDS_REVIEW')
 
     def test_transport_failure_does_not_resubmit_creation(self):
         runner, reports = self.runner(True)
@@ -266,6 +397,101 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(creation_outcome({**snapshot, 'same_context': False}, 2), 'changed')
         self.assertEqual(creation_outcome({**snapshot, 'last': {**response, 'code': 0}}, 2), 'created')
         self.assertEqual(creation_outcome({**snapshot, 'last': {**response, 'status': 500}}, 2), 'unknown')
+
+    def test_dialog_alone_does_not_replace_completed_business_response(self):
+        response = {'sequence': 2, 'status': 200, 'code': None, 'message': ''}
+        snapshot = {'sequence': 2, 'pending': 0, 'active': 0, 'same_context': True, 'last': response}
+        message = '网络异常，请稍后再试'
+        self.assertEqual(creation_outcome(snapshot, 2, message), 'retry')
+        self.assertEqual(creation_outcome(snapshot, 2, '其他提醒'), 'unknown')
+        self.assertEqual(creation_outcome(snapshot, 2, ''), 'unknown')
+        self.assertEqual(creation_outcome({**snapshot, 'last': {**response, 'code': 1}}, 2, message), 'retry')
+        self.assertEqual(creation_outcome({**snapshot, 'pending': 1}, 2, message), 'pending')
+        self.assertEqual(creation_outcome({**snapshot, 'active': 1}, 2, message), 'pending')
+        self.assertEqual(creation_outcome({**snapshot, 'same_context': False}, 2, message), 'changed')
+        self.assertEqual(creation_outcome(snapshot, 3, message), 'unknown')
+        self.assertEqual(creation_outcome(snapshot, 2, '今天已经预约羽毛球场'), 'existing')
+        self.assertEqual(creation_outcome({**snapshot, 'last': {**response, 'status': 0}}, 2, message), 'unknown')
+
+    def test_business_terminal_conditions_take_priority_over_generic_retries(self):
+        response = {'sequence': 2, 'status': 200, 'code': 3, 'message': '未知失败'}
+        snapshot = {'sequence': 2, 'pending': 0, 'same_context': True, 'last': response}
+        self.assertEqual(creation_outcome(snapshot, 2), 'retry')
+        self.assertEqual(creation_outcome(snapshot, 2, '今天已经预约羽毛球场'), 'existing')
+        self.assertEqual(creation_outcome(snapshot, 2, '场地已满'), 'occupied')
+        self.assertEqual(creation_outcome(snapshot, 2, '无权限预约'), 'rejected')
+        self.assertEqual(creation_outcome({**snapshot, 'last': {**response, 'code': 0}}, 2, '系统繁忙'), 'created')
+        self.assertEqual(business_failure('网络问题'), None)
+
+
+class DialogOriginTests(unittest.TestCase):
+    def driver(self, handle='school', cached=None):
+        class MetadataDriver:
+            capabilities = {'goog:chromeOptions': {'debuggerAddress': '127.0.0.1:9222'}}
+            @property
+            def current_window_handle(self):
+                if handle is None: raise WebDriverException('Native dialog blocks WebDriver')
+                return handle
+        driver = MetadataDriver()
+        if cached: driver._neu_dialog_window = cached
+        return driver
+
+    def origin(self, driver, targets):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(targets).encode()
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch('school_confirmation.build_opener', return_value=opener):
+            return school_dialog_origin(driver)
+
+    def test_loopback_metadata_reads_origin_when_alert_blocks_webdriver(self):
+        driver = self.driver(handle=None)
+        self.assertEqual(self.origin(driver, [{'type': 'page', 'id': 'school', 'url': 'https://book.neu.edu.cn/test'}]),
+                         'book.neu.edu.cn')
+
+    def test_origin_lookup_never_sends_a_webdriver_command_while_alert_is_open(self):
+        class BlockedDriver:
+            capabilities = {'goog:chromeOptions': {'debuggerAddress': '127.0.0.1:9222'}}
+            _neu_dialog_window = 'school'
+            @property
+            def current_window_handle(self): raise AssertionError('Do not send a blocked WebDriver command')
+            @property
+            def current_url(self): raise AssertionError('Do not send a blocked WebDriver command')
+        self.assertEqual(self.origin(BlockedDriver(), [{'type': 'page', 'id': 'school',
+                                                       'url': 'https://pay.neu.edu.cn/select'}]), 'pay.neu.edu.cn')
+
+    def test_cached_selected_target_is_matched_and_unknown_multiple_targets_fail_closed(self):
+        targets = [{'type': 'page', 'id': 'school', 'url': 'https://pay.neu.edu.cn/select'},
+                   {'type': 'page', 'id': 'wallet', 'url': 'https://excashier.alipay.com/pay'}]
+        self.assertEqual(self.origin(self.driver(handle=None, cached='CDwindow-wallet'), targets), 'excashier.alipay.com')
+        self.assertIsNone(self.origin(self.driver(handle=None), targets))
+
+    def test_metadata_endpoint_must_be_loopback_with_valid_port(self):
+        for address in ('example.org:9222', '127.0.0.1', '127.0.0.1:not-a-port',
+                        'user:password@127.0.0.1:9222', '127.0.0.1:9222/path'):
+            driver = self.driver()
+            driver.capabilities = {'goog:chromeOptions': {'debuggerAddress': address}}
+            with patch('school_confirmation.build_opener') as opener:
+                self.assertIsNone(school_dialog_origin(driver))
+                opener.assert_not_called()
+
+    def test_localhost_metadata_uses_ipv4_without_changing_explicit_ipv6(self):
+        for address, target in (('localhost:9222', 'http://127.0.0.1:9222/json/list'),
+                                ('[::1]:9222', 'http://[::1]:9222/json/list')):
+            driver = self.driver(cached='school')
+            driver.capabilities = {'goog:chromeOptions': {'debuggerAddress': address}}
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps([
+                {'type': 'page', 'id': 'school', 'url': 'https://pay.neu.edu.cn/select'}]).encode()
+            opener = MagicMock()
+            opener.open.return_value = response
+            with patch('school_confirmation.build_opener', return_value=opener):
+                self.assertEqual(school_dialog_origin(driver), 'pay.neu.edu.cn')
+                opener.open.assert_called_once_with(target, timeout=2)
+
+    def test_unavailable_metadata_keeps_dialog_manual(self):
+        with patch('school_confirmation.build_opener', side_effect=OSError('Unavailable')):
+            self.assertIsNone(school_dialog_origin(self.driver()))
 
 
 if __name__ == '__main__': unittest.main()

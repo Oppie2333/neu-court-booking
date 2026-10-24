@@ -20,7 +20,9 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, Ses
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from booking_rules import now, candidates, validate_config, poll_interval, booking_mode, paid_delay_seconds
+from booking_rules import now, candidates, validate_config, poll_interval
+
+LOGGER = logging.getLogger('neu_court_booking')
 
 PANEL_SCRIPT = """
 return Array.from(document.querySelectorAll('div.selectList.sectionNotes')).map(p => ({
@@ -58,12 +60,13 @@ class Runner:
     def report(self, state, message, **extra):
         self.state = state
         value = {'state': state, 'message': message, 'updated_at': now().isoformat(),
-                 'release_at': self.config['release_at'], 'target_date': self.config['target_date'], **extra}
+                 'release_at': self.config['release_at'], 'stop_at': self.config['stop_at'],
+                 'target_date': self.config['target_date'], **extra}
         temporary = (self.runtime / 'status.json').with_suffix('.tmp')
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
         temporary.replace((self.runtime / 'status.json'))
         self.publish(message)
-        logging.info('%s %s', state, message)
+        LOGGER.info('%s %s', state, message)
 
     def alert(self):
         try:
@@ -97,10 +100,11 @@ class Runner:
         return self.check_target_page()
 
     def current_candidates(self, panels):
-        return candidates(panels, self.config, allow_paid=(now() - self.release).total_seconds()
-                          >= paid_delay_seconds(self.config))
+        return candidates(panels, self.config)
 
     def prepare(self):
+        # A previous run's connection marker is not proof of a current browser.
+        (self.runtime / 'connection.json').unlink(missing_ok=True)
         self.report('STARTING', '正在打开学校预约浏览器，请在学校页面登录。')
         options = webdriver.ChromeOptions()
         options.add_argument('--window-size=1200,900')
@@ -116,7 +120,7 @@ class Runner:
         self.driver.set_page_load_timeout(10)
         if '--attach-port' not in sys.argv:
             self.driver.get(self.config['booking_url'])
-        self.report('WAITING_LOGIN', f'请在新开的 Chrome 学校页面登录；随后等待 {self.config["target_date"]} {self.release:%H:%M}。')
+        self.report('WAITING_LOGIN', f'请在新开的 Chrome 学校页面登录；本次扫描 {self.config["target_date"]} {self.release:%H:%M}–{self.deadline:%H:%M}。')
         while not self.stop.is_set():
             if now() >= self.deadline:
                 raise Halt('已超过本次任务截止时间。')
@@ -140,10 +144,11 @@ class Runner:
                                 self.publish('本次已授权自动勾选当前条款；内容变化时暂停。')
                     self.prepared = True
                     self.last_keepalive = time.monotonic()
-                    preference = ('只抢付费场，放号即查，下午优先' if booking_mode(self.config) == 'paid_only'
-                                  else f'免费首选 {self.config["preferred_slot"]}')
-                    self.report('ARMED', f'已启用 {self.config["target_date"]} {self.release:%H:%M} 任务，{preference}，最多一场。')
-                    self.publish('单次任务已启用；放号后按限定间隔串行查询，繁忙时延长间隔。')
+                    courts = '全部场地' if not self.config['court_numbers'] else '、'.join(
+                        f'{number}号' for number in self.config['court_numbers'])
+                    self.report('ARMED', f'已启用 {self.config["target_date"]} {self.release:%H:%M}–{self.deadline:%H:%M} 扫描，'
+                                f'打球时段 {self.config["play_start"]}–{self.config["play_end"]}，{courts}，最多一场。')
+                    self.publish('到设定时间后依次查询，繁忙时延长间隔；不区分免费与付费场。')
                     if self.config.get('auto_accept_terms'):
                         self.publish('当前学校条款已核对；根据你的明确授权，预约时会自动勾选，付款仍由你手动完成。')
                     (self.runtime / 'connection.json').write_text(json.dumps({
@@ -173,7 +178,7 @@ class Runner:
             if remaining > 8 and time.monotonic() - self.last_keepalive >= keepalive_interval:
                 try:
                     if self.load_page() is None:
-                        self.report('WAITING_LOGIN', '学校登录已失效，请在浏览器重新登录；程序仍等待本次放号。')
+                        self.report('WAITING_LOGIN', '学校登录已失效，请在浏览器重新登录；程序仍等待本次扫描。')
                         self.alert()
                         while not self.stop.is_set() and now() < self.deadline:
                             if self.check_target_page() is not None:
@@ -232,7 +237,7 @@ class Runner:
         return finish_if_verified(self)
 
     def scan(self):
-        self.report('SCANNING', '已到放号时间，正在按已确认的日期、时段和预算查找场地。')
+        self.report('SCANNING', '已到扫描开始时间，正在查找所选日期、打球时段和场地。')
         rounds = 0
         while not self.stop.is_set() and now() < self.deadline:
             round_started = time.monotonic()
@@ -242,18 +247,20 @@ class Runner:
                     raise Halt('登录失效，请在浏览器重新登录后重启任务。')
                 available = self.current_candidates(panels)
                 rounds += 1
+                self.report('SCANNING', f'第{rounds}轮：找到{len(available)}个符合条件的场次。',
+                            scan_round=rounds, candidate_count=len(available),
+                            query_duration_ms=round((time.monotonic() - round_started) * 1000))
                 if available:
                     if self.submit(available[0]):
                         return
-                elif rounds == 1 or rounds % 10 == 0:
-                    self.publish(f'第{rounds}轮：尚无符合当前优先级和预算的场次。')
                 if not available:
                     self.consecutive_failures = 0
             except TimeoutException:
                 if self.submission:
                     raise Halt('提交后页面超时，结果未知；请检查订单，停止重复提交。')
                 self.consecutive_failures += 1
-                self.publish('网站响应超时，稍后重试。')
+                self.report('SCANNING', '网站查询响应超时，稍后重试。', scan_round=rounds,
+                            consecutive_failures=self.consecutive_failures)
             interval = poll_interval((now() - self.release).total_seconds(), self.consecutive_failures, self.config)
             # One browser thread only. This limits query starts, including load time.
             delay = interval if self.consecutive_failures else max(0, interval - (time.monotonic() - round_started))
@@ -277,10 +284,12 @@ class Runner:
             self.report('NEEDS_REVIEW', str(error))
             self.alert()
         except SessionNotCreatedException:
+            # Avoid persisting exception payloads that may include credentials or signed URLs.
+            LOGGER.error('Browser startup failed: SessionNotCreatedException (Chrome session was not created)')
             self.report('FAILED', '无法启动Chrome。请确认已安装并更新Chrome，且首次使用时可联网下载匹配驱动。')
             self.alert()
         except Exception as error:
-            logging.error('Runner failed: %s', type(error).__name__)
+            LOGGER.error('Runner failed: %s', type(error).__name__)
             self.report('FAILED', f'程序遇到异常（{type(error).__name__}），已停止；详见本机日志。')
             self.capture('failure')
             self.alert()
@@ -297,3 +306,4 @@ class Runner:
                 self.driver.quit()
             except WebDriverException:
                 pass
+        (self.runtime / 'connection.json').unlink(missing_ok=True)

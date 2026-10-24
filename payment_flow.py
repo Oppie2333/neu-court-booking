@@ -1,11 +1,10 @@
 """Open a manual checkout window; never authorize or complete payment."""
 import re
-import time
 from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoAlertPresentException, WebDriverException
+from selenium.common.exceptions import WebDriverException
 from booking_rules import now
-from creation_watch import transient_message
+from creation_watch import PaymentWatch, business_failure
 
 
 def payment_amount(text):
@@ -67,10 +66,12 @@ def choose_manual_channel(driver):
 
 def payment_button(driver):
     buttons = driver.find_elements(By.XPATH,
-        "//button[normalize-space(.)='去支付' or normalize-space(.)='支付']"
-        "|//input[(@type='button' or @type='submit') and (@value='去支付' or @value='支付')]"
-        "|//a[normalize-space(.)='去支付' or normalize-space(.)='支付']")
-    visible = [button for button in buttons if button.is_displayed() and button.is_enabled()]
+        "//button|//input[@type='button' or @type='submit']|//a")
+    # Exact school checkout labels only. Wallet buttons such as 确认支付 and
+    # 确认付款 must never match this allowlist.
+    labels = {'申请支付', '支付申请', '去支付', '支付', '申请'}
+    visible = [button for button in buttons if button.is_displayed() and button.is_enabled()
+               and re.sub(r'\s+', '', button.text or button.get_attribute('value') or '') in labels]
     return visible[0] if len(visible) == 1 else None
 
 
@@ -78,9 +79,11 @@ def continue_payment(runner):
     driver = runner.driver
     selection = runner.submission
     config = getattr(runner, 'config', {})
-    end = time.monotonic() + 60
-    known = set(driver.window_handles)
+    # Import lazily: confirmation invokes this function after order creation.
+    from school_confirmation import dismiss_school_alerts
+    known = None
     last_page = None
+    watch = PaymentWatch(driver)
     amount_verified = False
     clicked = False
     channel_chosen = False
@@ -94,30 +97,41 @@ def continue_payment(runner):
         runner.alert()
         return True
 
-    while not runner.stop.is_set() and now() < runner.deadline and time.monotonic() < end:
+    limit = min(config.get('max_price_yuan', 30), 30)
+    if selection['is_free'] or not 0 < selection['estimated_price_yuan'] <= limit:
+        return review('当前场次不属于预算内的付费订单，停止打开支付。')
+
+    while not runner.stop.is_set() and now() < runner.deadline:
         try:
+            # Drain every repeated dialog, including temporary read/accept
+            # errors, before touching window handles, URL or page elements.
+            cleared, messages = dismiss_school_alerts(runner, 'payment', attempts)
+            if not cleared:
+                if runner.stop.is_set() or now() >= runner.deadline:
+                    break
+                return review('当前弹窗来源无法核验为学校支付页面，保留弹窗请本人核对。')
+            if messages and business_failure('\n'.join(messages)):
+                return review('学校支付提示已确认，已有订单需本人核对：' + '\n'.join(messages))
+            if messages and clicked:
+                retry_requested = True
+            if known is None:
+                known = set(driver.window_handles)
             new_handles = set(driver.window_handles) - known
             if len(new_handles) > 1:
                 return review('出现多个新窗口，暂停自动点击，请核对学校订单的付款窗口。')
             if new_handles:
-                driver.switch_to.window(next(iter(new_handles)))
+                handle = next(iter(new_handles))
+                driver.switch_to.window(handle)
+                driver._neu_dialog_window = handle
                 known |= new_handles
-            try:
-                alert = driver.switch_to.alert
-                message = alert.text
-                alert.accept()
-                runner.report('PAYMENT_STARTING', '支付页面提示：' + message, selection=selection)
-                if not transient_message(message):
-                    return review('支付页面返回提示，需本人核对：' + message)
-                retry_requested = True
-            except NoAlertPresentException:
-                pass
+                continue  # Clear possible dialogs in the new window first.
             url = driver.current_url
             parsed = urlparse(url)
             text = driver.find_element(By.TAG_NAME, 'body').text
             if url != last_page:
                 clicked, channel_chosen, retry_requested = False, False, False
                 last_page = url
+                watch = PaymentWatch(driver)
             school_order = (parsed.hostname == 'book.neu.edu.cn'
                             and re.fullmatch(r'/booking/page/order/[^/]+', parsed.path))
             if school_order:
@@ -127,9 +141,10 @@ def continue_payment(runner):
                     return review('订单内容或状态不符合当前场次，暂停支付流程。')
             if parsed.hostname == 'pay.neu.edu.cn' or school_order:
                 amounts = payment_amount(text)
-                if amounts and not amount_matches(text, selection, config.get('max_price_yuan', 30)):
+                if amounts and not amount_matches(text, selection, limit):
                     return review('支付金额与所选场次不一致或超过预算，已停止；请核对订单。')
-                amount_verified = amount_verified or amount_matches(text, selection, config.get('max_price_yuan', 30))
+                current_amount_verified = amount_matches(text, selection, limit)
+                amount_verified = amount_verified or current_amount_verified
                 ready = qr_visible(driver, text)
                 if amount_verified and ready:
                     runner.capture('payment-window')
@@ -151,31 +166,57 @@ def continue_payment(runner):
                                 runner.report('PENDING_PAYMENT', '已显示微信/支付宝付款窗口，请手动完成付款。尚未付款，预约未最终完成。', selection=selection)
                                 runner.alert()
                                 return True
-                if not amount_verified:
+                # Previous pages can establish provenance for a provider QR,
+                # but cannot authorize a click on a new school page with no amount.
+                if not current_amount_verified:
                     runner.stop.wait(0.2)
                     continue
+                if not watch.install():
+                    return review('无法核对支付请求状态，已有订单保留，请手动继续付款。')
                 if not channel_chosen:
                     channel_chosen = bool(school_order) or choose_manual_channel(driver)
                     runner.stop.wait(0.2)
                     continue
                 if not clicked or retry_requested:
-                    if attempts >= config.get('payment_max_attempts', 5):
+                    max_attempts = config.get('payment_max_attempts')
+                    if max_attempts is not None and attempts >= max_attempts:
                         return review('打开付款窗口多次失败，已有订单保留，请手动继续付款。')
-                    if retry_requested:
-                        idle = driver.execute_script('return window.jQuery ? jQuery.active === 0 : null;')
-                        if idle is not True:
-                            runner.stop.wait(0.2)
-                            continue
-                        if runner.stop.wait(min(0.5 * 2 ** max(attempts - 1, 0), 2)):
-                            break
                     button = payment_button(driver)
                     if button:
+                        status = watch.arm(button, retry=retry_requested)
+                        if not status:
+                            return review('无法核对支付表单，已有订单保留，请手动继续付款。')
+                        if status.get('pending'):
+                            runner.stop.wait(0.2)
+                            continue
+                        if not status.get('same_context'):
+                            return review('支付表单已改变，停止重试，请核对已有订单。')
+                        if retry_requested and runner.stop.wait(min(0.5 * 2 ** min(max(attempts - 1, 0), 3), 2)):
+                            break
                         if runner.stop.is_set() or now() >= runner.deadline:
                             break
-                        button.click()
+                        if retry_requested:
+                            # The page may start a request or change during the
+                            # backoff. Recheck immediately before dispatching.
+                            status = watch.arm(button, retry=True)
+                            if not status or not status.get('same_context'):
+                                return review('支付表单已改变，停止重试，请核对已有订单。')
+                            if status.get('pending'):
+                                runner.stop.wait(0.2)
+                                continue
+                            if not amount_matches(driver.find_element(By.TAG_NAME, 'body').text, selection, limit):
+                                return review('重试前支付金额无法核对，停止自动操作，请核对已有订单。')
+                        if runner.stop.is_set() or now() >= runner.deadline:
+                            break
+                        # Mark the attempt BEFORE dispatching. A WebDriver error
+                        # during the click is ambiguous and must not cause an
+                        # automatic second click without an explicit rejection.
                         attempts += 1
                         clicked, retry_requested = True, False
+                        button.click()
             elif is_provider(url):
+                if payment_amount(text) and not amount_matches(text, selection, limit):
+                    return review('付款窗口金额与目标订单不一致，停止自动操作，请核对订单。')
                 if amount_verified and qr_visible(driver, text):
                     runner.capture('payment-window')
                     runner.report('PENDING_PAYMENT', '已打开微信/支付宝付款窗口，请手动付款。尚未付款，预约未最终完成。', selection=selection)

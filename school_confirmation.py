@@ -5,12 +5,14 @@ Retry explicit server failures on the same form. Reconcile ambiguous writes.
 """
 import re
 import hashlib
+import json
 import time
+from urllib.request import build_opener, ProxyHandler
 from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoAlertPresentException, WebDriverException
 from booking_rules import now
-from creation_watch import CreationWatch, creation_outcome, transient_message
+from creation_watch import CreationWatch, creation_outcome, business_failure
 from payment_flow import continue_payment, payment_amount, matches_selection
 
 
@@ -45,8 +47,62 @@ def result_state(url, text, selection):
     return None
 
 
+SCHOOL_DIALOG_HOSTS = frozenset({'book.neu.edu.cn', 'pay.neu.edu.cn'})
+
+
+def school_dialog_origin(driver):
+    """Read our local Chrome's page metadata even while a native alert is open.
+
+    ChromeDriver blocks ordinary URL/CDP commands during an alert. The browser's
+    loopback metadata endpoint remains readable and sends no school requests.
+    Never expose its address, page URLs or authenticated contents in diagnostics.
+    """
+    capabilities = getattr(driver, 'capabilities', {}) or {}
+    address = capabilities.get('goog:chromeOptions', {}).get('debuggerAddress')
+    if address:
+        try:
+            endpoint = urlparse('http://' + address)
+            if (endpoint.hostname not in {'127.0.0.1', 'localhost', '::1'}
+                    or not endpoint.port or endpoint.username or endpoint.password
+                    or endpoint.path or endpoint.query or endpoint.fragment):
+                return None
+            handle = getattr(driver, '_neu_dialog_window', None)
+            # Any WebDriver command can block behind an open dialog. Use only
+            # the handle remembered while quiet or after our explicit switch.
+            opener = build_opener(ProxyHandler({}))
+            # Chrome on Windows can advertise localhost while listening only on
+            # IPv4. Avoid an IPv6 connection timeout for every repeated dialog.
+            host = '127.0.0.1' if endpoint.hostname == 'localhost' else endpoint.hostname
+            if host == '::1':
+                host = '[::1]'
+            metadata_url = f'http://{host}:{endpoint.port}/json/list'
+            with opener.open(metadata_url, timeout=2) as response:
+                payload = response.read(1_000_001)
+            if len(payload) > 1_000_000:
+                return None
+            targets = [target for target in json.loads(payload)
+                       if target.get('type') == 'page' and isinstance(target.get('url'), str)]
+            target_id = str(handle or '').removeprefix('CDwindow-')
+            matches = [target for target in targets if target.get('id') == target_id]
+            if len(matches) == 1:
+                url = matches[0]['url']
+            elif len(targets) == 1:
+                url = targets[0]['url']
+            else:
+                return None  # Multiple unmatched pages cannot establish dialog provenance.
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+    else:
+        try:
+            url = driver.current_url
+        except WebDriverException:
+            return None
+    parsed = urlparse(url)
+    return parsed.hostname if parsed.scheme in ('http', 'https') else None
+
+
 def dismiss_school_alerts(runner, stage='creation', attempts=0):
-    """Drain repeated error dialogs before reading the page or clicking goPay."""
+    """Confirm every school dialog; inspect business results only after closing it."""
     messages = []
     confirmations = 0
     quiet_check = False
@@ -59,6 +115,10 @@ def dismiss_school_alerts(runner, stage='creation', attempts=0):
                 quiet_check = True
                 runner.stop.wait(0.1)
                 continue
+            try:
+                runner.driver._neu_dialog_window = runner.driver.current_window_handle
+            except (AttributeError, WebDriverException):
+                pass
             return True, messages
         except WebDriverException:
             # A busy browser can fail to read an alert temporarily.
@@ -68,13 +128,13 @@ def dismiss_school_alerts(runner, stage='creation', attempts=0):
         changed = not messages or messages[-1] != message
         if changed:
             messages.append(message)
+        if school_dialog_origin(runner.driver) not in SCHOOL_DIALOG_HOSTS:
+            return False, messages  # Wallet/unknown-origin confirmations remain manual.
         if changed or confirmations % 10 == 0:
             runner.report('SCHOOL_MESSAGE', '正在确认学校提示：' + message,
                           selection=runner.submission, school_message=message,
                           stage=stage, attempt=attempts, alert_confirmations=confirmations)
-        if not (transient_message(message)
-                or re.search(r'已被预约|已被抢|已约满|场地已满|该时段已满', message)):
-            # Unrecognized confirmations are not permission to perform another action.
+        if runner.stop.is_set() or now() >= runner.deadline:
             return False, messages
         try:
             alert.accept()
@@ -130,22 +190,13 @@ def finish_if_verified(runner):
             if not cleared:
                 if runner.stop.is_set() or now() >= runner.deadline:
                     break
-                return review('学校弹窗需要人工核对：' + messages[-1])
-            message = messages[-1] if messages else None
+                return review('当前弹窗来源无法核验为学校预约/支付页面，保留弹窗请本人核对。')
+            message = '\n'.join(messages) if messages else None
             if message is not None:
                 # Time spent clearing dialogs must not consume the response wait.
                 until = time.monotonic() + 25
-                occupied = bool(re.search(r'已被预约|已被抢|已约满|场地已满|该时段已满', message))
-                busy = transient_message(message)
-                if stage == 'validation' and (occupied or busy):
-                    runner.consecutive_failures = runner.consecutive_failures + 1 if busy else 0
-                    runner.submission = None
-                    runner.publish('该场次被拒绝，继续按优先级查询。' if occupied else '校验服务繁忙，延长间隔后再查。')
-                    return False
                 if stage in ('creation', 'retry'):
                     pending_message = message
-                else:
-                    return review('学校返回提示，需要核对：' + message)
 
             current_url = driver.current_url
             parsed = urlparse(current_url)
@@ -163,9 +214,21 @@ def finish_if_verified(runner):
                 runner.alert()
                 return True
 
+            if stage == 'validation' and messages:
+                failure = business_failure(message)
+                if failure == 'existing':
+                    return reconcile(message)
+                if failure == 'rejected':
+                    return review('学校校验返回不可继续的提示，已确认弹窗并停止：' + message)
+                if failure == 'occupied':
+                    runner.consecutive_failures = 0
+                    runner.submission = None
+                    runner.publish('学校明确返回场次已满，继续查询其他符合条件的场次。')
+                    return False
+
             if stage == 'creation':
                 snapshot = watch.snapshot()
-                outcome = creation_outcome(snapshot, sequence)
+                outcome = creation_outcome(snapshot, sequence, pending_message)
                 if (outcome == 'unknown' and pending_message is None and not (snapshot or {}).get('last')
                         and time.monotonic() < until):
                     runner.stop.wait(0.1)
@@ -199,6 +262,8 @@ def finish_if_verified(runner):
                     pending_message = None
                     runner.stop.wait(0.1)
                     continue
+                elif outcome == 'existing':
+                    return reconcile(pending_message or '学校提示已有预约，请核对现有订单。')
                 elif outcome in ('rejected', 'changed'):
                     return review('学校返回不可重试的提示或预约表单发生变化，已停止。', school_message=pending_message)
                 else:
@@ -208,6 +273,11 @@ def finish_if_verified(runner):
                 boxes = driver.find_elements(By.ID, 'read_already')
                 buttons = driver.find_elements(By.ID, 'goPay')
                 visible = boxes and buttons and boxes[0].is_displayed() and buttons[0].is_displayed()
+                if not visible and stage == 'validation' and messages:
+                    runner.consecutive_failures += 1
+                    runner.submission = None
+                    runner.publish('校验提示已确认，尚未进入条款确认页；延长间隔后重新查询。')
+                    return False
                 if visible:
                     if config.get('auto_accept_terms') is True:
                         terms = driver.find_element(By.ID, 'pay_button').get_attribute('textContent')
@@ -236,6 +306,10 @@ def finish_if_verified(runner):
                                 return review('无法核对学校请求结果，暂停提交，避免盲目重试。')
                             monitor_installed = True
                         if not watch.arm():
+                            snapshot = watch.snapshot()
+                            if snapshot and (snapshot.get('pending') or snapshot.get('active')):
+                                runner.stop.wait(0.1)
+                                continue
                             if stage == 'retry':
                                 return review('上次请求仍在处理或表单已改变，停止重试。')
                             runner.stop.wait(0.1)

@@ -38,7 +38,7 @@ return true;
 SNAPSHOT = r"""
 const w = window.__neuCreationWatch;
 if (!w) return null;
-return {sequence:w.sequence, pending:w.pending, last:w.last,
+return {sequence:w.sequence, pending:w.pending, active:jQuery.active, last:w.last,
   same_context:w.baseline !== null && w.baseline === w.context()};
 """
 
@@ -54,26 +54,57 @@ def transient_message(message):
     return bool(re.search(r'网络异常[，,、\s]*请稍后再试|系统(?:繁忙|忙)|服务(?:繁忙|忙)|请稍后重试', message or ''))
 
 
-def creation_outcome(snapshot, sequence):
+def business_failure(message):
+    """Separate terminal booking rules from wording used for temporary failures."""
+    message = message or ''
+    if re.search(r'已(?:经)?预约|已有.*(?:预约|订单)|重复(?:预约|下单)|已存在.*订单', message):
+        return 'existing'
+    if re.search(r'已被预约|已被抢|已约满|场地已满|该时段已满|已售罄|无剩余场地', message):
+        return 'occupied'
+    if re.search(r'未登录|请.*登录|登录.*(?:失效|过期|超时)|认证失败|未认证|'
+                 r'无权限|没有权限|无权|禁止预约|不允许预约|黑名单|资格不符|'
+                 r'参数.*(?:错误|无效|异常|不合法|缺失)|无效参数|'
+                 r'请.*(?:填写|输入)|(?:姓名|学号).*(?:错误|无效|不存在)|'
+                 r'订单.*(?:失效|过期|取消|关闭)|'
+                 r'not\s*logged|session\s*(?:expired|invalid)|invalid\s*(?:parameter|argument)',
+                 message, re.IGNORECASE):
+        return 'rejected'
+    return None
+
+
+def creation_outcome(snapshot, sequence, alert_message=None):
     """A server-declared failure is different from a lost response after a write."""
     if not snapshot or snapshot.get('sequence') != sequence:
         return 'unknown'
-    if snapshot.get('pending'):
+    if snapshot.get('pending') or snapshot.get('active'):
         return 'pending'
     last = snapshot.get('last')
-    if not last or last.get('sequence') != sequence:
+    if last and last.get('sequence') != sequence:
         return 'unknown'
-    if not 200 <= last.get('status', 0) < 300 or last.get('code') is None:
+    # An actual HTTP/transport failure leaves the write ambiguous, even if the
+    # page also displayed a friendly busy dialog. Reconcile instead of writing.
+    if last and not 200 <= last.get('status', 0) < 300:
         return 'unknown'
-    if last['code'] == 0:
+    if last and last.get('code') == 0:
         return 'created'
     if not snapshot.get('same_context'):
         return 'changed'
-    if transient_message(last.get('message')):
-        return 'retry'
-    if re.search(r'已被预约|已被抢|已约满|场地已满|该时段已满', last.get('message', '')):
-        return 'occupied'
-    return 'rejected'
+    # Preserve the observed explicit busy-alert response even when the server
+    # omitted a numeric code, but never infer failure from arbitrary dialog text.
+    if not last or last.get('code') is None:
+        terminal = business_failure(alert_message) or business_failure((last or {}).get('message'))
+        if terminal in ('existing', 'rejected'):
+            return terminal
+        if terminal == 'occupied':
+            return 'unknown'
+        if last and transient_message(alert_message):
+            return 'retry'
+        return 'unknown'
+    outcomes = [business_failure(last.get('message')), business_failure(alert_message)]
+    for terminal in ('existing', 'rejected', 'occupied'):
+        if terminal in outcomes:
+            return terminal
+    return 'retry'
 
 
 class CreationWatch:
@@ -122,3 +153,58 @@ fetch('/booking/page/orderList', {credentials:'same-origin', cache:'no-store', s
   }).then(url => { clearTimeout(timer); done(url); })
   .catch(() => { clearTimeout(timer); done(null); });
 """, selection)
+
+
+PAYMENT_INSTALL = r"""
+if (window.__neuPaymentWatch) return true;
+const w = window.__neuPaymentWatch = {pending:0, baseline:null};
+// Count future browser requests without sending requests or recording payloads.
+const send = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function(...args) {
+  w.pending++;
+  let finished = false;
+  const finish = () => { if (!finished) { finished = true; w.pending--; } };
+  this.addEventListener('loadend', finish, {once:true});
+  try { return send.apply(this, args); } catch (error) { finish(); throw error; }
+};
+if (window.fetch) {
+  const fetch = window.fetch;
+  window.fetch = function(...args) {
+    w.pending++;
+    try { return Promise.resolve(fetch.apply(this, args)).finally(() => { w.pending--; }); }
+    catch (error) { w.pending--; throw error; }
+  };
+}
+w.context = function(button) {
+  const form = button.closest('form') || document;
+  return JSON.stringify({url:location.href, tag:button.tagName,
+    id:button.id, name:button.name, value:button.value, text:button.textContent,
+    action:button.getAttribute('formaction'), onclick:button.getAttribute('onclick'),
+    formAction:form.getAttribute ? form.getAttribute('action') : null,
+    formMethod:form.getAttribute ? form.getAttribute('method') : null,
+    fields:Array.from(form.querySelectorAll('input,select,textarea'))
+      .map(e => [e.tagName, e.id, e.name, e.type, e.value, e.checked])});
+};
+return true;
+"""
+
+PAYMENT_ARM = r"""
+const w = window.__neuPaymentWatch, button = arguments[0], retry = arguments[1];
+if (!w || !button || !button.isConnected) return null;
+const context = w.context(button);
+const pending = w.pending + (window.jQuery ? jQuery.active : 0);
+if (!retry && !pending) w.baseline = context;
+return {pending:pending, same_context:w.baseline !== null && w.baseline === context};
+"""
+
+
+class PaymentWatch:
+    """Retry checkout only after the same form explicitly rejected a request."""
+    def __init__(self, driver):
+        self.driver = driver
+
+    def install(self):
+        return self.driver.execute_script(PAYMENT_INSTALL) is True
+
+    def arm(self, button, retry=False):
+        return self.driver.execute_script(PAYMENT_ARM, button, retry)

@@ -1,5 +1,5 @@
-"""Booking mode transitions with local fixtures; no browser or school requests."""
-from datetime import datetime, timedelta
+"""Migration from retired fee modes to generic editable selection preferences."""
+from datetime import datetime
 import json
 from pathlib import Path
 import sys
@@ -8,148 +8,76 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app_settings import build_config, load_preferences, save_preferences, task_summary
-from booking_rules import CHINA, booking_mode, candidates, paid_delay_seconds, paid_enabled, validate_config
-from booking_runner import Runner
+from app_settings import load_preferences, save_preferences
+from booking_rules import CHINA, candidates
 
 
-class BookingModeTests(unittest.TestCase):
+class PreferenceMigrationTests(unittest.TestCase):
     def setUp(self):
-        self.current = datetime(2026, 10, 19, 6, 30, tzinfo=CHINA)
-        self.values = {'target_date': '2026-10-19', 'release_time': '07:00', 'duration_minutes': '15',
-                       'preferred_slot': '15:30-17:00', 'fallback_start': '14:00', 'fallback_end': '21:00',
-                       'max_price_yuan': '30', 'paid_fallback_after_seconds': '15',
-                       'paid_fallback': False, 'companions': [{'name': 'Test Companion', 'id': 'TEST001'}]}
+        self.current = datetime(2026, 10, 24, 11, 30, tzinfo=CHINA)
 
-    def config(self, **changes):
-        return build_config({**self.values, **changes}, self.current)
-
-    def panel(self, config, slots):
-        return {'name': '1号羽毛球场', 'date': config['target_date'], 'index': '0', 'slots': slots}
-
-    def test_legacy_mode_migration_never_infers_paid_only_from_free_only_false(self):
-        for saved, expected in (({}, 'free_only'), ({'paid_fallback': False, 'free_only': False}, 'free_only'),
-                                ({'paid_fallback': True, 'free_only': False}, 'free_first')):
-            with self.subTest(saved=saved), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                (root / 'settings.json').write_text(json.dumps(saved), encoding='utf-8')
-                with patch('app_settings.now', return_value=self.current):
-                    loaded = load_preferences(root)
-                self.assertEqual(loaded['booking_mode'], expected)
-                self.assertEqual(booking_mode(loaded), expected)
-
-    def test_legacy_runtime_without_mode_keeps_paid_fallback_behavior(self):
-        for paid, expected in ((False, 'free_only'), (True, 'free_first')):
-            for day in ('2026-10-19', '2026-10-24'):
-                config = {'target_date': day, 'paid_fallback': paid, 'free_only': False}
-                with self.subTest(paid=paid, day=day):
-                    self.assertEqual(booking_mode(config), 'paid_only' if day.endswith('24') else expected)
-
-    def test_explicit_mode_overrides_conflicting_legacy_paid_flag(self):
-        for mode, paid in (('free_only', True), ('free_first', False), ('paid_only', False)):
-            with self.subTest(mode=mode):
-                config = self.config(booking_mode=mode, paid_fallback=paid)
-                self.assertEqual(config['booking_mode'], mode)
-                self.assertEqual(booking_mode(config), mode)
-                self.assertEqual(config['free_only'], mode == 'free_only')
-                self.assertEqual(paid_enabled(config), mode != 'free_only')
-
-    def test_invalid_explicit_modes_are_rejected_on_weekdays_and_weekends(self):
-        for day in ('2026-10-19', '2026-10-24'):
-            for mode in ('', 'invalid', None, True, [], {}):
-                with self.subTest(day=day, mode=mode), self.assertRaises(ValueError):
-                    self.config(target_date=day, booking_mode=mode)
-
-    def test_explicit_saved_mode_takes_precedence_over_legacy_boolean(self):
-        for mode, legacy in (('free_only', True), ('free_first', False), ('paid_only', False)):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                (root / 'settings.json').write_text(json.dumps({'booking_mode': mode, 'paid_fallback': legacy}),
-                                                   encoding='utf-8')
-                with patch('app_settings.now', return_value=self.current):
-                    loaded = load_preferences(root)
-                self.assertEqual(booking_mode(loaded), mode)
-
-    def test_weekend_save_preserves_each_weekday_mode_preference(self):
-        for mode in ('free_only', 'free_first', 'paid_only'):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                config = self.config(target_date='2026-10-24', booking_mode=mode)
-                self.assertEqual(config['booking_mode'], mode)
-                self.assertEqual(booking_mode(config), 'paid_only')
-                save_preferences(config, root)
-                saved = json.loads((root / 'settings.json').read_text(encoding='utf-8'))
-                self.assertEqual(saved['booking_mode'], mode)
-                with patch('app_settings.now', return_value=self.current):
-                    loaded = load_preferences(root)
-                self.assertEqual(booking_mode(loaded), mode)
-                self.assertEqual(loaded['free_only'], mode == 'free_only')
-
-    def test_weekday_paid_only_does_not_require_unused_free_time_or_wait(self):
-        for slot, grace in (('', ''), ('invalid', 'invalid'), ('', 301), ('', -1), ('', None)):
-            with self.subTest(slot=slot, grace=grace):
-                config = self.config(booking_mode='paid_only', preferred_slot=slot,
-                                     paid_fallback_after_seconds=grace)
-                self.assertEqual(booking_mode(config), 'paid_only')
-                self.assertEqual(paid_delay_seconds(config), 0)
-                validate_config(config)
-
-    def test_paid_only_excludes_all_free_slots_even_when_legacy_other_free_is_allowed(self):
-        config = {**self.config(booking_mode='paid_only'), 'allow_other_free': True}
-        panels = [self.panel(config, ['15:30-17:00(学免) 可用', '14:00-15:00(学免) 可用',
-                                     '14:00-16:00 可用 ￥30', '18:00-19:00 可用 ￥15'])]
-        self.assertEqual(candidates(panels, config), [])
-        found = candidates(panels, config, allow_paid=True)
-        self.assertEqual([c['slot'] for c in found], ['14:00-16:00', '18:00-19:00'])
-        self.assertTrue(all(not c['is_free'] for c in found))
-
-    def test_paid_only_orders_afternoons_first_then_earlier_start_without_free_preference(self):
-        for preferred in ('', '09:00-10:00', '20:00-21:00', 'invalid'):
-            config = self.config(booking_mode='paid_only', preferred_slot=preferred,
-                                 fallback_start='08:00', fallback_end='22:00')
-            panels = [self.panel(config, ['19:00-20:00 可用', '17:00-18:00 可用',
-                                         '09:00-10:00 可用', '14:00-15:00 可用'])]
-            with self.subTest(preferred=preferred):
-                self.assertEqual([c['slot'] for c in candidates(panels, config, allow_paid=True)],
-                                 ['14:00-15:00', '17:00-18:00', '09:00-10:00', '19:00-20:00'])
-
-    def test_paid_only_keeps_time_duration_and_amount_filters(self):
-        config = self.config(booking_mode='paid_only')
-        panels = [self.panel(config, ['13:00-14:00 可用', '14:00-15:00 可用 ￥40',
-                                     '14:00-15:30 可用', '20:00-22:00 可用',
-                                     '14:00-16:00 可用 ￥30', '18:00-19:00 可用 ￥15'])]
-        self.assertEqual([c['slot'] for c in candidates(panels, config, allow_paid=True)],
-                         ['14:00-16:00', '18:00-19:00'])
-        self.assertEqual([c['slot'] for c in candidates(panels, {**config, 'max_price_yuan': 15}, allow_paid=True)],
-                         ['18:00-19:00'])
-
-    def test_paid_only_starts_paid_at_release_and_never_selects_free(self):
-        config = self.config(booking_mode='paid_only', paid_fallback_after_seconds='300')
-        panels = [self.panel(config, ['15:30-17:00(学免) 可用', '14:00-15:00 可用'])]
+    def load(self, saved):
         with tempfile.TemporaryDirectory() as temp:
-            runner = Runner(config, temp, lambda _: None)
-            for elapsed, expected in ((-1, []), (0, ['14:00-15:00']), (15, ['14:00-15:00'])):
-                with self.subTest(elapsed=elapsed), patch('booking_runner.now', return_value=runner.release + timedelta(seconds=elapsed)):
-                    self.assertEqual([c['slot'] for c in runner.current_candidates(panels)], expected)
-            self.assertIsNone(runner.driver)
-            self.assertFalse(runner.thread.is_alive())
+            root = Path(temp)
+            (root / 'settings.json').write_text(json.dumps(saved), encoding='utf-8')
+            with patch('app_settings.now', return_value=self.current):
+                return load_preferences(root)
 
-    def test_paid_modes_cannot_bypass_manual_payment_budget_or_single_order_checks(self):
-        for mode in ('free_first', 'paid_only'):
-            config = self.config(booking_mode=mode)
-            for change in ({'payment_mode': 'auto'}, {'max_price_yuan': 31}, {'max_successful_bookings': 2},
-                           {'student_hourly_rate_yuan': 20}, {'free_only': True}):
-                with self.subTest(mode=mode, change=change), self.assertRaises(ValueError):
-                    validate_config({**config, **change})
+    def test_old_free_paid_modes_and_delays_have_no_effect_on_new_selection(self):
+        for old_mode in ('free_only', 'free_first', 'paid_only', 'invalid'):
+            with self.subTest(old_mode=old_mode):
+                config = self.load({'booking_mode': old_mode, 'paid_fallback': True, 'free_only': True,
+                                    'paid_fallback_after_seconds': 'invalid', 'preferred_slot': '20:00-21:00',
+                                    'fallback_start': '09:00', 'fallback_end': '17:00', 'poll_seconds': 1})
+                self.assertEqual((config['play_start'], config['play_end']), ('09:00', '17:00'))
+                self.assertEqual(config['poll_seconds'], 1)
+                self.assertNotIn('booking_mode', config)
+                self.assertNotIn('paid_fallback_after_seconds', config)
+                panel = {'name': '1号羽毛球场', 'date': config['target_date'], 'index': '0',
+                         'slots': ['09:00-10:00 可用', '14:00-15:00(学免) 可用']}
+                self.assertEqual([c['slot'] for c in candidates([panel], config)], ['09:00-10:00', '14:00-15:00'])
 
-    def test_paid_only_summary_omits_unused_free_time_and_wait(self):
-        config = self.config(booking_mode='paid_only', preferred_slot='13:10-14:40',
-                             paid_fallback_after_seconds='73')
-        summary = task_summary(config)
-        self.assertRegex(summary, r'(?:仅(?:预约)?|只(?:抢|预约)?)付费')
-        self.assertNotIn('13:10-14:40', summary)
-        self.assertNotIn('73秒', summary)
-        self.assertIn('手动', summary)
+    def test_explicit_new_play_window_wins_over_legacy_fallback(self):
+        config = self.load({'play_start': '16:00', 'play_end': '19:00',
+                            'fallback_start': '09:00', 'fallback_end': '12:00', 'court_numbers': '8，2 8'})
+        self.assertEqual((config['play_start'], config['play_end']), ('16:00', '19:00'))
+        self.assertEqual(config['court_numbers'], [8, 2])
+
+    def test_old_three_phase_settings_preserve_only_fixed_middle_interval(self):
+        config = self.load({'fast_poll_seconds': 0.5, 'poll_seconds': '2.5', 'slow_poll_seconds': 3,
+                            'fast_window_seconds': 60, 'slow_after_seconds': 180})
+        self.assertEqual(config['poll_seconds'], 2.5)
+        self.assertNotIn('fast_poll_seconds', config)
+        self.assertNotIn('slow_poll_seconds', config)
+        self.assertEqual(self.load({'fast_poll_seconds': 0.5, 'slow_poll_seconds': 3})['poll_seconds'], 0.5)
+
+    def test_saved_task_date_terms_and_scope_cannot_override_new_task_defaults(self):
+        config = self.load({'target_date': '2026-10-19', 'release_at': '2026-10-19T07:00:00+08:00',
+                            'auto_accept_terms': True, 'approved_terms_sha256': 'old-approval',
+                            'payment_mode': 'auto', 'max_price_yuan': 999, 'max_successful_bookings': 99})
+        self.assertEqual(config['target_date'], '2026-10-24')
+        self.assertFalse(config['auto_accept_terms'])
+        self.assertEqual(config['approved_terms_sha256'], '')
+        self.assertEqual(config['payment_mode'], 'manual')
+        self.assertEqual(config['max_price_yuan'], 30)
+        self.assertEqual(config['max_successful_bookings'], 1)
+
+    def test_resaved_legacy_preferences_drop_all_retired_keys(self):
+        config = self.load({'booking_mode': 'free_first', 'paid_fallback': True,
+                            'fallback_start': '13:00', 'fallback_end': '20:00', 'companions': []})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            save_preferences(config, root)
+            saved = json.loads((root / 'settings.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['play_start'], '13:00')
+            self.assertEqual(saved['play_end'], '20:00')
+            self.assertTrue(set(saved).isdisjoint({'booking_mode', 'paid_fallback', 'fallback_start', 'fallback_end'}))
+
+    def test_malformed_new_preferences_fail_with_value_error(self):
+        for saved in ([], {'poll_seconds': True}, {'court_numbers': [13]}, {'scan_start': 'invalid'},
+                      {'scan_start': '21:00', 'scan_end': '14:00'}, {'play_start': '21:00', 'play_end': '14:00'}):
+            with self.subTest(saved=saved), self.assertRaises(ValueError):
+                self.load(saved)
 
 
 if __name__ == '__main__':
