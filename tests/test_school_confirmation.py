@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from school_confirmation import result_state, finish_if_verified, terms_fingerprint, dismiss_school_alerts, school_dialog_origin
 from creation_watch import creation_outcome, business_failure
+from booking_runner import Runner
 from booking_rules import now
 from selenium.common.exceptions import NoAlertPresentException, WebDriverException
 
@@ -147,8 +148,9 @@ class ConfirmationTests(unittest.TestCase):
     def runner(self, agreed):
         reports = []
         runner = SimpleNamespace(driver=Driver(agreed), stop=Stop(not agreed), deadline=now()+timedelta(minutes=1),
-            submission=dict(SELECTION), consecutive_failures=0, report=lambda *args, **kw: reports.append(args),
+            submission=dict(SELECTION), consecutive_failures=0, occupied_slots={}, report=lambda *args, **kw: reports.append(args),
             publish=lambda *args: None, capture=lambda *args: None, alert=lambda: None)
+        runner.resume_after_occupied = lambda message: Runner.resume_after_occupied(runner, message)
         return runner, reports
     def test_does_not_accept_agreement_or_create_without_user(self):
         runner, reports = self.runner(False)
@@ -255,11 +257,16 @@ class ConfirmationTests(unittest.TestCase):
             def __init__(self, driver):
                 super().__init__(driver)
                 self.calls = 0
+                self.pending_checks = 0
             def arm(self):
                 self.calls += 1
+                if self.calls == 2:
+                    self.pending_checks = 2
                 return self.calls != 2
             def snapshot(self):
-                return {**super().snapshot(), 'active': int(self.calls == 2)}
+                pending = self.pending_checks > 0
+                self.pending_checks = max(0, self.pending_checks - 1)
+                return {**super().snapshot(), 'active': int(pending)}
         runner, reports = self.runner(True)
         runner.driver.responses = [{'status': 200, 'code': 1, 'message': '系统繁忙'}]
         with patch('school_confirmation.CreationWatch', TemporarilyBusyWatch):
@@ -375,6 +382,98 @@ class ConfirmationTests(unittest.TestCase):
         runner.driver.responses = [{'status': 200, 'code': 1, 'message': '场地已满'}]
         self.assertFalse(finish_if_verified(runner))
         self.assertIsNone(runner.submission)
+
+    def test_busy_confirmations_then_already_full_resume_scanning(self):
+        for code in (1, None):
+            runner, reports = self.runner(True)
+            runner.consecutive_failures = 3
+            runner.driver = RepeatingAlertDriver([3, 2, 4])
+            runner.driver.responses = [
+                {'status': 200, 'code': 1, 'message': '网络异常，请稍后再试'},
+                {'status': 200, 'code': 1, 'message': '系统繁忙'},
+                {'status': 200, 'code': code, 'message': '15:30-17:00时段已经约满，请选择其他场次'},
+            ]
+            driver = runner.driver
+            with self.subTest(code=code):
+                self.assertFalse(finish_if_verified(runner))
+                self.assertIs(runner.driver, driver)
+                self.assertEqual(driver.button.clicks, 3)
+                self.assertEqual(driver.accepted_alerts, 9)
+                self.assertIsNone(runner.submission)
+                self.assertEqual(runner.consecutive_failures, 0)
+                self.assertIn((SELECTION['date'], SELECTION['name'], SELECTION['slot']), runner.occupied_slots)
+                self.assertEqual(reports[-1][0], 'SCANNING')
+                self.assertNotIn('NEEDS_REVIEW', [report[0] for report in reports])
+
+    def test_validation_full_message_is_confirmed_and_skipped_before_creation(self):
+        runner, reports = self.runner(True)
+        runner.driver.pending_alert = '该时段已经约满'
+        self.assertFalse(finish_if_verified(runner))
+        self.assertEqual(runner.driver.accepted_alerts, 1)
+        self.assertEqual(runner.driver.button.clicks, 0)
+        self.assertIsNone(runner.submission)
+        self.assertEqual(len(runner.occupied_slots), 1)
+        self.assertEqual(reports[-1][0], 'SCANNING')
+
+    def test_full_message_with_ambiguous_response_still_reconciles(self):
+        for response in ({'status': 503, 'code': 1}, {'status': 0, 'code': None}):
+            runner, reports = self.runner(True)
+            runner.driver.responses = [{**response, 'message': '该时段已经约满'}]
+            with self.subTest(response=response):
+                self.assertTrue(finish_if_verified(runner))
+                self.assertEqual(runner.driver.button.clicks, 1)
+                self.assertIsNotNone(runner.submission)
+                self.assertEqual(runner.occupied_slots, {})
+                self.assertIn('CHECKING_ORDER', [report[0] for report in reports])
+                self.assertEqual(reports[-1][0], 'NEEDS_REVIEW')
+
+    def test_full_message_arriving_while_waiting_to_retry_is_not_resubmitted(self):
+        class LateFullWatch(FakeWatch):
+            def __init__(self, driver):
+                super().__init__(driver)
+                self.arms = 0
+            def arm(self):
+                self.arms += 1
+                if self.arms == 2:
+                    self.driver.pending_alert = '该时段已经约满'
+                    self.driver.last['message'] = self.driver.pending_alert
+                    return False
+                return True
+            def snapshot(self):
+                snapshot = super().snapshot()
+                return {**snapshot, 'active': int(self.arms == 2 and self.driver.pending_alert is not None)}
+        runner, reports = self.runner(True)
+        runner.driver.responses = [{'status': 200, 'code': 1, 'message': '系统繁忙'}]
+        with patch('school_confirmation.CreationWatch', LateFullWatch):
+            self.assertFalse(finish_if_verified(runner))
+        self.assertEqual(runner.driver.button.clicks, 1)
+        self.assertEqual(runner.driver.accepted_alerts, 2)
+        self.assertIsNone(runner.submission)
+        self.assertEqual(reports[-1][0], 'SCANNING')
+
+    def test_inventory_rejection_wording_and_existing_order_priority(self):
+        for message in ('15:30-17:00时段已经约满', '该场次已约满', '场地已满',
+                        '该时段已经被预约', '该时段预约已满', '已被抢走', '已售罄'):
+            with self.subTest(message=message):
+                self.assertEqual(business_failure(message), 'occupied')
+        for message in ('尚未约满', '场地未满', '网络异常，请稍后再试'):
+            self.assertIsNone(business_failure(message))
+        self.assertEqual(business_failure('今天已经预约羽乒馆-10号羽毛球场'), 'existing')
+        self.assertEqual(business_failure('该时段已经约满；今天已经预约羽毛球场'), 'existing')
+
+    def test_full_without_numeric_code_requires_completed_correlated_response(self):
+        message = '该时段已经约满'
+        response = {'sequence': 2, 'status': 200, 'code': None, 'message': message}
+        snapshot = {'sequence': 2, 'pending': 0, 'active': 0, 'same_context': True, 'last': response}
+        self.assertEqual(creation_outcome(snapshot, 2, message), 'occupied')
+        self.assertEqual(creation_outcome(snapshot, 2), 'occupied')
+        for changes, expected in (({'pending': 1}, 'pending'), ({'active': 1}, 'pending'),
+                                  ({'same_context': False}, 'changed'), ({'last': None}, 'unknown'),
+                                  ({'sequence': 3}, 'unknown'),
+                                  ({'last': {**response, 'status': 503}}, 'unknown'),
+                                  ({'last': {**response, 'code': 0}}, 'created')):
+            with self.subTest(changes=changes):
+                self.assertEqual(creation_outcome({**snapshot, **changes}, 2, message), expected)
 
     def test_retry_limit_and_stop_are_respected(self):
         runner, reports = self.runner(True)

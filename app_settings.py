@@ -7,7 +7,7 @@ from pathlib import Path
 
 from booking_rules import BOOKING_URL, CHINA, now, minutes, court_numbers, query_interval, validate_config
 
-VERSION = '1.2.0-preview.2'
+VERSION = '1.2.0-preview.3'
 PREFERENCE_KEYS = ('scan_start', 'scan_end', 'play_start', 'play_end', 'court_numbers', 'poll_seconds', 'companions')
 
 

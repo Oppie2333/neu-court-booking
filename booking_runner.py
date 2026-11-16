@@ -23,6 +23,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from booking_rules import now, candidates, validate_config, poll_interval
 
 LOGGER = logging.getLogger('neu_court_booking')
+OCCUPIED_SLOT_RETRY_SECONDS = 30
 
 PANEL_SCRIPT = """
 return Array.from(document.querySelectorAll('div.selectList.sectionNotes')).map(p => ({
@@ -54,6 +55,7 @@ class Runner:
         self.last_keepalive = 0
         self.last_countdown = 0
         self.submission = None
+        self.occupied_slots = {}
         self.consecutive_failures = 0
         self.thread = threading.Thread(target=self.run, daemon=True)
 
@@ -100,7 +102,23 @@ class Runner:
         return self.check_target_page()
 
     def current_candidates(self, panels):
-        return candidates(panels, self.config)
+        current = time.monotonic()
+        self.occupied_slots = {key: until for key, until in self.occupied_slots.items() if until > current}
+        return [candidate for candidate in candidates(panels, self.config)
+                if (candidate['date'], candidate['name'], candidate['slot']) not in self.occupied_slots]
+
+    def resume_after_occupied(self, message):
+        """Release one rejected slot while keeping this task and browser session."""
+        selection = self.submission
+        key = (selection['date'], selection['name'], selection['slot'])
+        self.occupied_slots[key] = time.monotonic() + OCCUPIED_SLOT_RETRY_SECONDS
+        self.submission = None
+        self.consecutive_failures = 0
+        self.report('SCANNING', f"{selection['name']} {selection['slot']} 已约满；已确认提示，"
+                    f'暂时跳过该场次{OCCUPIED_SLOT_RETRY_SECONDS}秒，继续用当前登录扫描其他符合条件的场次。',
+                    selection=None, unavailable_selection=selection, school_message=message,
+                    retry_after_seconds=OCCUPIED_SLOT_RETRY_SECONDS)
+        return False
 
     def prepare(self):
         # A previous run's connection marker is not proof of a current browser.

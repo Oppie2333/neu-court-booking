@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="144" viewBox="0 0 960 144" role="img" aria-labelledby="title desc">
+  <title id="title">三步开始预约</title>
+  <desc id="desc">完整解压程序，设置需求并提前登录，等待预约并本人付款。</desc>
+  <rect width="960" height="144" rx="20" fill="#0f2035"/>
+  <g fill="none" stroke="#2c4560" stroke-width="2">
+    <rect x="16" y="16" width="286" height="112" rx="14"/>
+    <rect x="337" y="16" width="286" height="112" rx="14"/>
+    <rect x="658" y="16" width="286" height="112" rx="14"/>
+  </g>
+  <g font-family="'Microsoft YaHei','PingFang SC',sans-serif">
+    <g fill="#78e6d0" font-size="14" font-weight="700" letter-spacing="2">
+      <text x="38" y="47">01 / DOWNLOAD</text>
+      <text x="359" y="47">02 / GET READY</text>
+      <text x="680" y="47">03 / BOOK</text>
+    </g>
+    <g fill="#f4f8ff" font-size="22" font-weight="700">
+      <text x="38" y="81">完整解压程序</text>
+      <text x="359" y="81">设置 · 提前登录</text>
+      <text x="680" y="81">等待预约 · 本人付款</text>
+    </g>
+    <g fill="#a8b9cd" font-size="14">
+      <text x="38" y="107">Windows + Chrome</text>
+      <text x="359" y="107">日期 / 时间 / 场地</text>
+      <text x="680" y="107">保持联网，不休眠</text>
+    </g>
+  </g>
+  <g fill="none" stroke="#edbc62" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M312 72h15m-5-5 6 5-6 5"/>
+    <path d="M633 72h15m-5-5 6 5-6 5"/>
+  </g>
+</svg>

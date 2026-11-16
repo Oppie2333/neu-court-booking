@@ -1,7 +1,9 @@
-东北大学南湖羽毛球预约助手 1.2.0-preview.2（预发布测试版）
-2026-10-24
-下载：https://github.com/Oppie2333/neu-court-booking/releases/tag/v1.2.0-preview.2
-Windows附件：NEUCourtBooking-1.2.0-preview.2-windows-x64.zip；校验值：SHA256SUMS.txt
+东北大学南湖羽毛球预约助手 1.2.0-preview.3（预发布测试版）
+
+本版修复：“XX时段已经约满”等提示确认后，在请求已明确失败时自动继续扫描，保留当前学校登录；刚约满的具体场次跳过30秒，其他时段仍可选择。无需停止重开或重新登录。结果不明或已有订单时仍先核对，避免重复预约。
+2026-11-16
+公开下载：https://github.com/Oppie2333/neu-court-booking/releases/tag/v1.2.0-preview.3
+运行包：NEUCourtBooking-1.2.0-preview.3-windows-x64.zip；校验值：SHA256SUMS.txt
 
 1. 需要Windows 10/11 64位、Google Chrome及能访问学校网站的网络。
 2. 解压整个文件夹后双击NEUCourtBooking.exe，不要只取出exe；无需安装Python。
@@ -18,5 +20,6 @@ Windows附件：NEUCourtBooking-1.2.0-preview.2-windows-x64.zip；校验值：SH
 13. 保持电脑开机联网、不休眠。运行时请勿同时手动提交。截止时间到或点停止后，不再继续提交，不会每天自动执行。
 
 详细说明：docs文件夹中的“使用说明.md”。
-本版103项自动测试、本地Chrome模拟流程、运行包界面和Chrome空白页启动检查已通过；未验证真实学校预约与支付全流程、真实高峰成功率或另一台电脑兼容性，不能保证抢到场地。
+本版112项自动测试、本地Chrome连续约满后换场模拟、运行包界面和Chrome空白页启动检查已通过。本次修复的真实高峰效果仍待继续反馈。
+根据使用者反馈，程序已在本机及其他电脑多次成功预约，实测有效；不保证100%抢到，建议尽早启动并提前登录学校预约系统，确认任务已就绪。
 分享时只发原始压缩包，不要附个人设置、同行人、登录资料或日志。

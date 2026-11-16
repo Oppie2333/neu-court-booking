@@ -56,10 +56,11 @@ def transient_message(message):
 
 def business_failure(message):
     """Separate terminal booking rules from wording used for temporary failures."""
-    message = message or ''
-    if re.search(r'已(?:经)?预约|已有.*(?:预约|订单)|重复(?:预约|下单)|已存在.*订单', message):
+    message = re.sub(r'\s+', '', message or '')
+    if re.search(r'已(?:经)?预约(?!满)|已有.*(?:预约|订单)|重复(?:预约|下单)|已存在.*订单', message):
         return 'existing'
-    if re.search(r'已被预约|已被抢|已约满|场地已满|该时段已满|已售罄|无剩余场地', message):
+    if re.search(r'已(?:经)?(?:约满|预约满|订满|售罄)|预约已(?:经)?满|'
+                 r'(?:场地|时段|场次)已(?:经)?满|已(?:经)?被(?:他人|其他人|别人)?(?:预约|预订|抢)|无剩余场地', message):
         return 'occupied'
     if re.search(r'未登录|请.*登录|登录.*(?:失效|过期|超时)|认证失败|未认证|'
                  r'无权限|没有权限|无权|禁止预约|不允许预约|黑名单|资格不符|'
@@ -89,21 +90,19 @@ def creation_outcome(snapshot, sequence, alert_message=None):
         return 'created'
     if not snapshot.get('same_context'):
         return 'changed'
-    # Preserve the observed explicit busy-alert response even when the server
-    # omitted a numeric code, but never infer failure from arbitrary dialog text.
-    if not last or last.get('code') is None:
-        terminal = business_failure(alert_message) or business_failure((last or {}).get('message'))
-        if terminal in ('existing', 'rejected'):
-            return terminal
-        if terminal == 'occupied':
-            return 'unknown'
-        if last and transient_message(alert_message):
-            return 'retry'
-        return 'unknown'
-    outcomes = [business_failure(last.get('message')), business_failure(alert_message)]
+    outcomes = [business_failure((last or {}).get('message')), business_failure(alert_message)]
     for terminal in ('existing', 'rejected', 'occupied'):
         if terminal in outcomes:
+            # A correlated completed 2xx response and an explicit full-slot
+            # rejection can release this candidate even without a numeric code.
+            # A dialog alone cannot establish that an in-flight write failed.
+            if terminal == 'occupied' and not last:
+                return 'unknown'
             return terminal
+    # Preserve the observed busy-alert retry when the server omitted a numeric
+    # code, but never infer failure from arbitrary dialog text.
+    if not last or last.get('code') is None:
+        return 'retry' if last and transient_message(alert_message) else 'unknown'
     return 'retry'
 
 

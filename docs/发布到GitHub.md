@@ -1,6 +1,6 @@
 # 发布到 GitHub
 
-本文件以 **1.2.0-preview.2**（**2026-10-24**）的 **预发布测试版（pre-release）** 为例，说明本地 Git、源码上传与运行包发布流程。目标仓库为 [Oppie2333/neu-court-booking](https://github.com/Oppie2333/neu-court-booking)。已有仓库请从对应步骤继续，勿重复初始化。
+本文件以 **1.2.0-preview.3**（**2026-11-16**）的 **预发布测试版（pre-release）** 为例，说明本地 Git、源码上传与运行包发布流程。目标仓库为 [Oppie2333/neu-court-booking](https://github.com/Oppie2333/neu-court-booking)。已有仓库请从对应步骤继续，勿重复初始化。
 
 ## 发布源码
 
@@ -19,7 +19,7 @@ git add .
 git status --short
 git diff --cached --stat
 git diff --cached
-git commit -m "Release v1.2.0-preview.2"
+git commit -m "Release v1.2.0-preview.3"
 git remote add origin https://github.com/Oppie2333/neu-court-booking.git
 git push -u origin main
 ```
@@ -49,9 +49,9 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -Python .venv/Scripts
 将完整目录压缩成当前版本运行包，并生成配套校验值：
 
 ```powershell
-Compress-Archive -LiteralPath dist/NEUCourtBooking -DestinationPath NEUCourtBooking-1.2.0-preview.2-windows-x64.zip
-$packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.2.0-preview.2-windows-x64.zip).Hash.ToLowerInvariant()
-"$packageHash  NEUCourtBooking-1.2.0-preview.2-windows-x64.zip" | Set-Content -Encoding ascii SHA256SUMS.txt
+Compress-Archive -LiteralPath dist/NEUCourtBooking -DestinationPath NEUCourtBooking-1.2.0-preview.3-windows-x64.zip
+$packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.2.0-preview.3-windows-x64.zip).Hash.ToLowerInvariant()
+"$packageHash  NEUCourtBooking-1.2.0-preview.3-windows-x64.zip" | Set-Content -Encoding ascii SHA256SUMS.txt
 ```
 
 保留程序目录中的 `_internal`、使用说明和 `third_party_licenses` 等文件，不要只上传 exe。源码可用 GitHub 自动提供的源码压缩包，Windows zip 作为独立附件上传。代码提交时不提交 `dist`、构建缓存和虚拟环境。
@@ -67,22 +67,22 @@ $packageHash = (Get-FileHash -Algorithm SHA256 NEUCourtBooking-1.2.0-preview.2-w
 - 停止按钮有效，关闭后不会留下继续下单的后台程序。
 - 使用说明、许可证、第三方许可资料与程序一并分发。
 
-本版 103 项自动测试通过；本地 Chrome 模拟验证连续弹窗确认、失败重试、未知结果核验与付款二维码交接；运行包通过界面和 Chrome `about:blank` 启动检查。未验证真实学校预约和支付全流程、真实高峰成功率或另一台电脑的兼容性，不应将模拟结果写成实际预约成功证明。
+本版 112 项自动测试通过；本地 Chrome 模拟覆盖繁忙后连续两次约满、保留同一登录继续换场及付款二维码交接；运行包通过界面和 Chrome `about:blank` 启动检查。使用者已反馈在本机与其他电脑多次成功预约；本次修复的真实高峰效果仍待反馈，不应将模拟结果写成实际成功率。
 
 ## 创建 Release
 
 确认源码与最终产物一致后，创建并推送当前版本标签：
 
 ```powershell
-git tag -a v1.2.0-preview.2 -m "v1.2.0-preview.2 prerelease"
-git push origin v1.2.0-preview.2
+git tag -a v1.2.0-preview.3 -m "v1.2.0-preview.3 prerelease"
+git push origin v1.2.0-preview.3
 ```
 
 在目标仓库打开 **Releases → Draft a new release**：
 
-1. 选择标签 `v1.2.0-preview.2`，标题填写 `v1.2.0-preview.2 · 自选扫描时段与弹窗连续确认`。
+1. 选择标签 `v1.2.0-preview.3`，标题填写 `v1.2.0-preview.3 · 约满后保留登录继续抢场`。
 2. 复制 [.github/RELEASE_TEMPLATE.md](../.github/RELEASE_TEMPLATE.md) 正文，核对日期、验证结果及附件。
-3. 上传完整 `NEUCourtBooking-1.2.0-preview.2-windows-x64.zip` 和对应的 `SHA256SUMS.txt`。整理后的源码 zip 可作为额外附件；GitHub 也会提供标签对应的源码下载。
+3. 上传完整 `NEUCourtBooking-1.2.0-preview.3-windows-x64.zip` 和对应的 `SHA256SUMS.txt`。整理后的源码 zip 可作为额外附件；GitHub 也会提供标签对应的源码下载。
 4. 勾选 **Set as a pre-release**，核对后再发布。
 
 不要把个人数据、日志或内存转储当作 Release 附件。
@@ -94,9 +94,10 @@ git push origin v1.2.0-preview.2
 - 自选扫描、打球窗口与场地备选，单一查询间隔；免费、付费同等考虑，每场最多 30 元、最多一份订单。
 - 学校原生弹窗不按文字筛选、反复确认；明确失败且请求结束、仍为同一表单时重试，结果未知先查单。
 - 免费订单会核验；付费尝试打开并核验付款二维码，再交给本人付款。
-- 103 项自动测试、本地 Chrome 模拟及运行包启动检查通过；未验证真实高峰成功率，不承诺预约成功。
+- 约满后保留登录继续扫描，具体约满场次暂时跳过 30 秒。
+- 112 项自动测试、本地 Chrome 模拟及运行包启动检查通过；根据使用者反馈已多次成功预约，不承诺每次成功。
 
-发布成功后核对 NEWS、README 的版本与下载地址。当前尚未完成另一台电脑的兼容性验证，因此保持预发布标记；不要将本机检查写成真实高峰预约成功。
+发布成功后核对 NEWS、README 的版本与下载地址。本次修复保持预发布标记，结合后续实测继续验证；不保证每次成功，建议提前启动并登录学校预约系统。
 
 ## 维护
 

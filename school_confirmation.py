@@ -221,12 +221,9 @@ def finish_if_verified(runner):
                 if failure == 'rejected':
                     return review('学校校验返回不可继续的提示，已确认弹窗并停止：' + message)
                 if failure == 'occupied':
-                    runner.consecutive_failures = 0
-                    runner.submission = None
-                    runner.publish('学校明确返回场次已满，继续查询其他符合条件的场次。')
-                    return False
+                    return runner.resume_after_occupied(message)
 
-            if stage == 'creation':
+            if stage in ('creation', 'retry'):
                 snapshot = watch.snapshot()
                 outcome = creation_outcome(snapshot, sequence, pending_message)
                 if (outcome == 'unknown' and pending_message is None and not (snapshot or {}).get('last')
@@ -243,19 +240,20 @@ def finish_if_verified(runner):
                     max_attempts = config.get('confirmation_max_attempts')
                     if max_attempts is not None and attempts >= max_attempts:
                         return review('本场次确认重试已达上限，学校仍返回失败，请检查页面。')
-                    delay = min(config.get('confirmation_retry_seconds', 0.5) * 2 ** min(attempts - 1, 3),
-                                config.get('confirmation_max_backoff_seconds', 2))
-                    runner.report('RETRYING_CONFIRMATION', f'学校明确返回失败，{delay:g}秒后重试同一场次的“去支付”（第{attempts + 1}次）。',
-                                  selection=runner.submission, school_message=pending_message, attempt=attempts + 1)
-                    if runner.stop.wait(delay):
-                        break
-                    pending_message = None
-                    stage = 'retry'
-                    until = time.monotonic() + 25
+                    if stage == 'creation':
+                        delay = min(config.get('confirmation_retry_seconds', 0.5) * 2 ** min(attempts - 1, 3),
+                                    config.get('confirmation_max_backoff_seconds', 2))
+                        runner.report('RETRYING_CONFIRMATION', f'学校明确返回失败，{delay:g}秒后重试同一场次的“去支付”（第{attempts + 1}次）。',
+                                      selection=runner.submission, school_message=pending_message, attempt=attempts + 1)
+                        if runner.stop.wait(delay):
+                            break
+                        stage = 'retry'
+                        until = time.monotonic() + 25
+                        continue  # Recheck late dialogs and responses after waiting.
                 elif outcome == 'occupied':
-                    runner.submission = None
-                    runner.publish('学校明确返回场次已满，继续查询其他符合条件的场次。')
-                    return False
+                    response_message = ((snapshot or {}).get('last') or {}).get('message')
+                    message = response_message if business_failure(response_message) == 'occupied' else pending_message
+                    return runner.resume_after_occupied(message or '学校明确返回该场次已约满。')
                 elif outcome == 'created':
                     if time.monotonic() >= until:
                         return reconcile('接口已返回成功，但订单页面尚未显示。')
@@ -317,6 +315,7 @@ def finish_if_verified(runner):
                         sequence = watch.snapshot()['sequence'] + 1
                         stage = 'creation'
                         attempts += 1
+                        pending_message = None
                         runner.report('CREATING_ORDER', f'正在点击同一场次的“去支付”（第{attempts}次）。', selection=runner.submission, attempt=attempts)
                         buttons[0].click()
                         until = time.monotonic() + 25
